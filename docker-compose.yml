@@ -1,0 +1,123 @@
+# HiveVault — development services.
+# postgres: PostgreSQL 17 + pgvector. pgbouncer: transaction pooling for the app.
+# Tuning for the development server (64 GB RAM, Docker VM 32 GB): see docs/PIANO_DI_SVILUPPO.md §2.5.
+name: hivevault
+
+services:
+  postgres:
+    # pgvector/pgvector:pg17 + pgBackRest (docker/postgres/Dockerfile)
+    build: docker/postgres
+    image: hivevault/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brain}
+      POSTGRES_DB: brain
+      # Passphrase of the backup repository. Development default only: scripts/install.sh
+      # generates a random one. Keep a copy outside the server, or the backups are lost.
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-dev-only-change-me}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=8GB
+      - -c
+      - effective_cache_size=20GB
+      - -c
+      - maintenance_work_mem=4GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - max_parallel_maintenance_workers=8
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - max_connections=200
+      # One chunk partition (and its indexes) per vault: a statement that touches many
+      # partitions takes one lock each. The default (64 per connection) runs out with a few
+      # hundred vaults ("out of shared memory").
+      - -c
+      - max_locks_per_transaction=1024
+      # Continuous WAL archiving to pgBackRest (point-in-time recovery). archive_timeout closes
+      # a WAL segment at least every 5 minutes: at most 5 minutes of changes can be lost.
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=brain archive-push %p
+      - -c
+      - archive_timeout=300
+    # Parallel index builds allocate maintenance_work_mem in /dev/shm: keep it larger than that.
+    shm_size: 6gb
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Backup repository. In production mount a different disk (or set repo2 to S3/SFTP in
+      # docker/postgres/pgbackrest.conf): a backup on the same disk does not survive the disk.
+      - pgbackrest:/var/lib/pgbackrest
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d brain"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_USER: brain
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-brain}
+      DB_NAME: brain
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: 2000
+      DEFAULT_POOL_SIZE: 40
+    ports:
+      - "127.0.0.1:6432:5432"
+
+
+  # ---------------------------------------------------------------------------
+  # Spike C2 only (docker compose --profile spikes up -d <service>). Run one at a time.
+  # ---------------------------------------------------------------------------
+  paradedb:
+    image: paradedb/paradedb:latest
+    profiles: [spikes]
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brain}
+      POSTGRES_DB: brain
+    command: ["postgres", "-c", "shared_buffers=8GB", "-c", "effective_cache_size=20GB", "-c", "maintenance_work_mem=4GB", "-c", "max_parallel_maintenance_workers=8", "-c", "max_parallel_workers_per_gather=4", "-c", "max_wal_size=8GB"]
+    shm_size: 6gb
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - spike_paradedb:/var/lib/postgresql
+
+  timescale:
+    image: timescale/timescaledb-ha:pg17
+    profiles: [spikes]
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brain}
+      POSTGRES_DB: brain
+    command: ["postgres", "-c", "shared_buffers=8GB", "-c", "effective_cache_size=20GB", "-c", "maintenance_work_mem=4GB", "-c", "max_parallel_maintenance_workers=8", "-c", "max_parallel_workers_per_gather=4", "-c", "max_wal_size=8GB"]
+    shm_size: 6gb
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - spike_timescale:/home/postgres/pgdata/data
+
+volumes:
+  pgdata:
+  pgbackrest:
+  spike_paradedb:
+  spike_timescale:

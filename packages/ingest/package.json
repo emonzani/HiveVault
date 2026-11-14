@@ -1,0 +1,20 @@
+{
+  "name": "@cb/ingest",
+  "version": "0.0.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cb/blobs": "0.0.1",
+    "@cb/brain": "0.0.1",
+    "@cb/db": "0.0.1",
+    "@cb/hive": "0.0.1",
+    "@cb/models": "0.0.1",
+    "@cb/parsers": "0.0.1",
+    "@cb/shared": "0.0.1",
+    "@cb/tasks": "0.0.1"
+  }
+}

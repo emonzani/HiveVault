@@ -1,0 +1,35 @@
+{
+  "name": "@cb/server",
+  "version": "0.0.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cb/auth": "0.0.1",
+    "@cb/blobs": "0.0.1",
+    "@cb/brain": "0.0.1",
+    "@cb/db": "0.0.1",
+    "@cb/hive": "0.0.1",
+    "@cb/ingest": "0.0.1",
+    "@cb/mcp": "0.0.1",
+    "@cb/metrics": "0.0.1",
+    "@cb/models": "0.0.1",
+    "@cb/parsers": "0.0.1",
+    "@cb/shared": "0.0.1",
+    "@cb/tasks": "0.0.1",
+    "@fastify/compress": "^9.3.0",
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/multipart": "^9.4.0",
+    "@fastify/static": "^10.1.8",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "fastify": "^5.12.7",
+    "jszip": "^3.10.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6"
+  }
+}

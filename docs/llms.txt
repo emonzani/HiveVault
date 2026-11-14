@@ -1,0 +1,32 @@
+# HiveVault
+
+> Self-hosted memory of a company. Documents stay on the company server; local models compile them into linked Markdown pages with citations. A cloud agent reads the compiled pages classified "pubblico" or "interno" through an MCP server, with an API key.
+
+## Connect
+
+- MCP (streamable HTTP, stateless): POST /mcp with header `Authorization: Bearer <API key>`. Only API accounts; the administrator grants vaults and scopes.
+- REST API for documents: /api/vaults, /api/vaults/{id}/sources (upload), /api/sources/{id} (status), /api/search, /api/pages/{id}.
+
+## MCP tools
+
+- brain_overview: vaults, page counts, coverage, recent pages. Call it first.
+- brain_search: hybrid search with filters; ids, summaries, snippets with citations, cost in tokens.
+- brain_read: a page or a document within a token budget; current state first.
+- brain_neighbors: links and backlinks, up to 2 steps.
+- brain_timeline: dated events of an entity, or of the vaults in a period.
+- brain_source: extracted text of a citation ^[src_…#cN]. Original files never leave the server.
+- brain_ask: short answer by the local model, with citations.
+- brain_capture: save a note in the inbox of a writable vault (scope write).
+- brain_journal: the work journal. "leggi" reads the latest session and day notes; "sessione" and "giornata" write a note (Fatto, Deciso, Aperto) in the inbox, linked to existing pages (scope write).
+- brain_propose_edit: propose a change; a person approves it (scope write).
+
+## Resources and prompts
+
+- brain://{vault}/index, brain://{vault}/llms.txt, brain://{vault}/page/{id}
+- Prompts: cosa-sappiamo-di, stato-cliente, prepara-riunione
+
+## Rules
+
+- Cite every fact with the id the tools return.
+- Pages classified "riservato" and "segreto" are never returned to API accounts.
+- A missing answer means "not in the memory or not visible to this account".

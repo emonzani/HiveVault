@@ -1,0 +1,225 @@
+/*
+ * Theme tokens of the "Editorial Knowledge" design system: warm editorial palette for the light
+ * theme, dark editorial palette for the dark one.
+ * Themes: scuro (dark, no data-theme attribute), chiaro (data-theme="chiaro").
+ *
+ * The variable names are the ones every view already uses: ink-0..3 are the surface tiers
+ * (canvas, panel, card, raised), "you" is the terracotta primary, "busy" the teal of live and
+ * compiled work, "idle" the slate azure of indexing, "alert" the crimson of errors. Small-text
+ * values are checked at 4.5:1 or more on ink-0, ink-1 and ink-2 (WCAG 2.1 AA): where the study
+ * gave a lower value (muted grays, the light primary button) the value here is a little darker.
+ */
+
+:root {
+  color-scheme: dark;
+  /* Surfaces: canvas, docked panels, cards, raised wells */
+  --ink-0: #121316;
+  --ink-1: #1a1b20;
+  --ink-2: #22232a;
+  --ink-3: #282a33;
+  --line: #2f303a;
+  --line-strong: #414352;
+
+  /* Primary (terracotta): actions, selection, focus */
+  --you: #e6764d;
+  --you-soft: rgba(230, 118, 77, 0.12);
+  --you-line: rgba(230, 118, 77, 0.4);
+  --you-mark: rgba(230, 118, 77, 0.35);
+  --you-ink: #f08a64;
+  --on-you: #121316;
+  /* Live / compiled (teal) */
+  --busy: #48b89f;
+  --busy-soft: #162a26;
+  --busy-ink: #5cc8ae;
+  /* Indexing / linked (slate azure) */
+  --idle: #60a5fa;
+  --idle-soft: #172333;
+  --idle-ink: #7cb6fb;
+  /* Error (crimson) */
+  --alert: #ef5350;
+  --alert-soft: #2e1717;
+  --alert-ink: #f47a77;
+  /* Warning (amber) */
+  --warn: #e0a84e;
+  --warn-soft: #2d2417;
+  --warn-ink: #e0a84e;
+
+  --hi: 255, 255, 255;
+  --hi-k: 1;
+  --lo: 0, 0, 0;
+  --lo-k: 1;
+  --panel: 34, 35, 42;
+  --well: rgba(0, 0, 0, 0.22);
+  --scrim: rgba(10, 11, 13, 0.65);
+  --topbar-bg: rgba(18, 19, 22, 0.92);
+  --sidebar-bg: var(--ink-1);
+  --desk-tint: 0%;
+
+  --bg-primary: var(--ink-0);
+  --bg-secondary: var(--ink-1);
+  --bg-card: var(--ink-2);
+  --bg-card-hover: var(--ink-3);
+  --border-subtle: var(--line);
+  --border-focus: var(--you);
+
+  --text-main: #f3eee8;
+  --text-muted: #a4a09c;
+  --text-dim: #9a958f;
+
+  /* Links to pages (wikilinks, results, backlinks): the slate blue; terracotta stays for actions */
+  --link: #7cb6fb;
+  --link-glow: rgba(124, 182, 251, 0.14);
+  --accent-purple: #b4a3e8;
+  --accent-purple-glow: rgba(180, 163, 232, 0.16);
+  --accent-blue: #7cb6fb;
+  --accent-cyan: #5cc8ae;
+  --accent-emerald: var(--busy-ink);
+  --accent-amber: var(--warn-ink);
+  --accent-rose: var(--alert-ink);
+
+  /* Knowledge taxonomy: entity, concept, decision, synthesis, source, note */
+  --tax-entity: #5cc8ae;
+  --tax-concept: #7cb6fb;
+  --tax-decision: #e0a84e;
+  --tax-synthesis: #f08a64;
+  --tax-source: #8fc98a;
+  --tax-note: #b4a3e8;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  --shadow-subtle: 0 4px 16px -2px rgba(0, 0, 0, 0.4), 0 1px 3px 0 rgba(0, 0, 0, 0.3);
+  --shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--line);
+  --shadow-glow: 0 0 0 1px var(--line-strong);
+  /* Resting cards: dark surfaces separate by tone, so no shadow */
+  --shadow-card: none;
+  --ring: 0 0 0 3px var(--you-mark);
+  --transition: all 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --transition-fast: 0.12s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --metric-color: rgba(230, 118, 77, 0.16);
+
+  /* Chart series: terracotta, teal, azure, amber, lavender, rose */
+  --series-1: #e6764d;
+  --series-2: #48b89f;
+  --series-3: #60a5fa;
+  --series-4: #e0a84e;
+  --series-5: #b4a3e8;
+  --series-6: #e57fa6;
+}
+
+/* Chiaro: warm parchment, graphite ink, terracotta actions */
+html[data-theme="chiaro"] {
+  color-scheme: light;
+  --ink-0: #fcf8f5;
+  --ink-1: #ffffff;
+  --ink-2: #f7f2ef;
+  --ink-3: #f1ede9;
+  --line: #e9e3de;
+  --line-strong: #dcd4cd;
+
+  /* Rust terracotta: white text on it is 6.3:1 */
+  --you: #9e3c14;
+  --you-soft: #ffeee8;
+  --you-line: rgba(158, 60, 20, 0.4);
+  --you-mark: rgba(158, 60, 20, 0.2);
+  --you-ink: #8b391a;
+  --on-you: #ffffff;
+  --busy: #2d676a;
+  --busy-soft: #e6f7f8;
+  --busy-ink: #256562;
+  --idle: #375f84;
+  --idle-soft: #edf4ff;
+  --idle-ink: #3b5676;
+  --alert: #b3261e;
+  --alert-soft: #ffe9e3;
+  --alert-ink: #9c2a12;
+  --warn: #d97706;
+  --warn-soft: #fff7ed;
+  --warn-ink: #9a3412;
+
+  --hi: 30, 30, 28;
+  --hi-k: 0.7;
+  --lo: 30, 30, 28;
+  --lo-k: 0.12;
+  --panel: 255, 255, 255;
+  --well: rgba(30, 30, 28, 0.04);
+  --scrim: rgba(30, 30, 28, 0.25);
+  --topbar-bg: rgba(252, 248, 245, 0.94);
+  --sidebar-bg: #f7f2ef;
+
+  --bg-card: var(--ink-1);
+  --bg-card-hover: #fff9f6;
+
+  --text-main: #191713;
+  --text-muted: #4c413d;
+  --text-dim: #6c5b53;
+
+  --link: #375f84;
+  --link-glow: rgba(55, 95, 132, 0.1);
+  --accent-purple: #6b5b95;
+  --accent-purple-glow: rgba(107, 91, 149, 0.14);
+  --accent-blue: #375f84;
+  --accent-cyan: #2d676a;
+
+  --tax-entity: #2d676a;
+  --tax-concept: #375f84;
+  --tax-decision: #a14a07;
+  --tax-synthesis: #8b391a;
+  --tax-source: #166534;
+  --tax-note: #6b5b95;
+
+  --shadow-subtle: 0 2px 8px -2px rgba(30, 30, 28, 0.06), 0 1px 3px 0 rgba(30, 30, 28, 0.04);
+  --shadow-modal: 0 12px 32px -6px rgba(30, 30, 28, 0.12), 0 4px 12px -2px rgba(30, 30, 28, 0.06);
+  --shadow-card: 0 1px 2px rgba(60, 40, 30, 0.04), 0 1px 1px rgba(60, 40, 30, 0.03);
+  --metric-color: rgba(158, 60, 20, 0.12);
+
+  --series-1: #9e3c14;
+  --series-2: #2d676a;
+  --series-3: #375f84;
+  --series-4: #b45309;
+  --series-5: #6b5b95;
+  --series-6: #b83d6e;
+}
+
+/* ---- Theme picker ---- */
+.theme-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0.4rem 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.theme-picker-label {
+  margin-right: auto;
+}
+.theme-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  /* the ring is a box-shadow outside the circle, so the gradient fills the whole swatch */
+  border: 0;
+  background-origin: border-box;
+  background-repeat: no-repeat;
+  box-shadow: 0 0 0 1px var(--line-strong);
+  cursor: pointer;
+  padding: 0;
+}
+.theme-swatch[aria-checked="true"] {
+  box-shadow: 0 0 0 2px var(--ink-1), 0 0 0 4px var(--text-main);
+}
+.theme-swatch:focus-visible {
+  outline: 2px solid var(--you);
+  outline-offset: 2px;
+}
+.theme-swatch[data-theme-value="scuro"] { background: linear-gradient(135deg, #121316 50%, #e6764d 50%); }
+.theme-swatch[data-theme-value="chiaro"] { background: linear-gradient(135deg, #fcf8f5 50%, #9e3c14 50%); }
+
+/* Theme change is instant: transitions are paused for one frame */
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+}

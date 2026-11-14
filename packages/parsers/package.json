@@ -1,0 +1,36 @@
+{
+  "name": "@cb/parsers",
+  "version": "0.0.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cb/shared": "0.0.1",
+    "@kenjiuno/msgreader": "^1.29.0",
+    "@mozilla/readability": "^0.6.0",
+    "@napi-rs/canvas": "^1.1.0",
+    "exceljs": "^4.4.0",
+    "file-type": "^21.3.4",
+    "jszip": "^3.10.2",
+    "linkedom": "^0.18.14",
+    "mailparser": "^3.12.4",
+    "mammoth": "^1.13.0",
+    "papaparse": "^5.7.0",
+    "piscina": "^5.3.2",
+    "turndown": "^7.2.4",
+    "unpdf": "^1.9.1",
+    "uuid": "^11.1.1"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.9.0",
+    "@types/papaparse": "^5.5.2",
+    "@types/pdfkit": "^0.17.7",
+    "@types/turndown": "^5.0.6",
+    "docx": "^9.15.0",
+    "pdfkit": "^0.17.2",
+    "pptxgenjs": "^4.0.1"
+  }
+}

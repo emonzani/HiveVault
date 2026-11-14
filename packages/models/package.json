@@ -1,0 +1,14 @@
+{
+  "name": "@cb/models",
+  "version": "0.0.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cb/shared": "0.0.1",
+    "undici": "^7.30.1"
+  }
+}

@@ -1,0 +1,249 @@
+import { generateKeyPairSync, randomBytes, X509Certificate } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
+import type { Sql } from "@cb/db";
+import { setupTestDb } from "@cb/db/testing";
+import { ulid } from "@cb/shared";
+import { Access, AuthError, AuthService, base32Decode, ipAllowed, sha256hex, signLogin, totp } from "../src/index.ts";
+import { SoftAuthenticator } from "./soft-authenticator.ts";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const fx = (f: string) => readFileSync(path.join(here, "fixtures", f), "utf8");
+const sql: Sql | undefined = await setupTestDb();
+const ORIGIN = "http://localhost:5310";
+const auth = sql
+  ? new AuthService(sql, {
+      masterKey: randomBytes(32),
+      webauthn: { rpId: "localhost", rpName: "HiveVault", origins: [ORIGIN] },
+      clientCaPems: [fx("ca.pem")],
+    })
+  : undefined;
+afterAll(async () => {
+  await auth?.stop();
+  await sql?.end();
+});
+const db = () => (sql ? it : it.skip);
+const run = ulid().slice(-6).toLowerCase();
+let n = 0;
+const uname = () => `u${run}-${n++}`;
+
+/** Creates a user and completes the TOTP enrollment. Returns the user and its secret. */
+async function enrolledUser(role: "admin" | "member" = "member") {
+  const p = await auth!.principals.createUser({ username: uname(), displayName: "Test", role });
+  const { code } = await auth!.totp.createEnrollment(p.id, null);
+  const start = await auth!.totp.startEnrollment(code);
+  const secret = base32Decode(start.secretBase32);
+  const res = await auth!.enrollConfirm(code, totp(secret));
+  return { p, secret, recovery: res.recoveryCodes, enrollCode: code };
+}
+
+describe("TOTP login", () => {
+  db()("enrolls, logs in, refuses reuse of the same code and of the enrollment code", async () => {
+    const { p, secret, enrollCode } = await enrolledUser();
+    await expect(auth!.totp.startEnrollment(enrollCode)).rejects.toThrow(/scaduto/);
+    // the enrollment code consumed the current step: the next login needs a new step
+    const next = totp(secret, Date.now() + 30_000);
+    const r = await auth!.loginTotp(p.name, next);
+    expect(r.principal.id).toBe(p.id);
+    expect(r.session.token).toHaveLength(43);
+    await expect(auth!.loginTotp(p.name, next)).rejects.toBeInstanceOf(AuthError);
+  });
+
+  db()("locks the user out after 5 failures and says the same thing for unknown users", async () => {
+    const { p } = await enrolledUser();
+    const err1 = await auth!.loginTotp(p.name, "000000").catch((e) => e);
+    const err2 = await auth!.loginTotp("nessuno-" + run, "000000").catch((e) => e);
+    expect(err1.message).toBe(err2.message);
+    for (let i = 0; i < 4; i++) await auth!.loginTotp(p.name, "000000").catch(() => {});
+    const locked = await auth!.loginTotp(p.name, "000000").catch((e) => e);
+    expect(locked.code).toBe("locked");
+    expect(locked.retryAfterMs).toBeGreaterThan(0);
+    const audit = await auth!.audit.query({ action: "login.totp", outcome: "denied", limit: 20 });
+    expect(audit.some((a) => a.principalId === p.id)).toBe(true);
+  });
+
+  db()("recovery codes work once", async () => {
+    const { p, recovery } = await enrolledUser();
+    expect(recovery).toHaveLength(10);
+    await auth!.loginRecovery(p.name, recovery[0]!.toUpperCase());
+    await expect(auth!.loginRecovery(p.name, recovery[0]!)).rejects.toBeInstanceOf(AuthError);
+    expect(await auth!.totp.remainingRecoveryCodes(p.id)).toBe(9);
+  });
+
+  db()("a suspended user cannot log in and loses its sessions", async () => {
+    const { p, secret } = await enrolledUser();
+    const s = await auth!.loginTotp(p.name, totp(secret, Date.now() + 30_000));
+    expect(await auth!.authenticate({ sessionToken: s.session.token })).not.toBeNull();
+    await auth!.principals.update(p.id, { status: "suspended" });
+    expect(await auth!.authenticate({ sessionToken: s.session.token })).toBeNull();
+    await expect(auth!.loginTotp(p.name, totp(secret, Date.now() + 60_000))).rejects.toBeInstanceOf(AuthError);
+  });
+});
+
+describe("sessions", () => {
+  db()("idle and absolute expiry, revocation", async () => {
+    const short = new AuthService(sql!, { masterKey: randomBytes(32), webauthn: { rpId: "localhost", rpName: "x", origins: [ORIGIN] }, session: { idleMs: 1000, maxMs: 60_000 } });
+    const { p } = await enrolledUser();
+    const s = await short.sessions.create(p.id, "totp");
+    expect(await short.sessions.resolve(s.token)).not.toBeNull();
+    await sql!`update sessions set last_seen_at = now() - interval '2 seconds' where id = ${s.id}`;
+    expect(await short.sessions.resolve(s.token)).toBeNull(); // idle
+    const s2 = await short.sessions.create(p.id, "totp");
+    await sql!`update sessions set expires_at = now() - interval '1 second' where id = ${s2.id}`;
+    expect(await short.sessions.resolve(s2.token)).toBeNull(); // absolute
+    const s3 = await short.sessions.create(p.id, "totp");
+    expect(await short.sessions.revokeAllFor(p.id)).toBeGreaterThanOrEqual(1);
+    expect(await short.sessions.resolve(s3.token)).toBeNull();
+    // only the hash is stored
+    const [row] = await sql!`select id from sessions where id = ${s3.id}`;
+    expect((row as { id: string }).id).not.toBe(s3.token);
+    await short.stop();
+  });
+});
+
+describe("API keys", () => {
+  db()("issue, verify, IP allow-list, expiry and revocation", async () => {
+    const a = await auth!.principals.createApiAccount({ name: `agent-${run}`, scopes: ["read"], allowedIps: ["10.0.0.0/8"] });
+    const { id, key } = await auth!.apiKeys.issue(a.id, "test");
+    expect(key).toMatch(/^cb_[a-z2-7]{12}_[A-Za-z0-9_-]{43}$/);
+    expect(await auth!.authenticate({ bearer: key, ip: "10.1.2.3" })).toMatchObject({ via: "apikey" });
+    expect(await auth!.authenticate({ bearer: key, ip: "192.168.1.5" })).toBeNull();
+    expect(await auth!.authenticate({ bearer: key.slice(0, -1) + (key.endsWith("A") ? "B" : "A"), ip: "10.1.2.3" })).toBeNull();
+    await auth!.principals.update(a.id, { expiresAt: new Date(Date.now() - 1000) });
+    expect(await auth!.authenticate({ bearer: key, ip: "10.1.2.3" })).toBeNull();
+    await auth!.principals.update(a.id, { expiresAt: null });
+    expect(await auth!.apiKeys.revoke(a.id, id)).toBe(true);
+    expect(await auth!.authenticate({ bearer: key, ip: "10.1.2.3" })).toBeNull();
+  });
+
+  it("matches IPv4, IPv6 and IPv4-mapped addresses against CIDRs", () => {
+    expect(ipAllowed("10.0.0.7", ["10.0.0.0/24"])).toBe(true);
+    expect(ipAllowed("::ffff:10.0.0.7", ["10.0.0.0/24"])).toBe(true);
+    expect(ipAllowed("10.0.1.7", ["10.0.0.0/24"])).toBe(false);
+    expect(ipAllowed("fd00::1", ["fd00::/8"])).toBe(true);
+    expect(ipAllowed("1.2.3.4", null)).toBe(true);
+  });
+});
+
+describe("signature login", () => {
+  for (const kind of ["ed25519", "ec"] as const) {
+    db()(`logs in with a ${kind} key; the nonce works once`, async () => {
+      const { p } = await enrolledUser();
+      const kp = kind === "ed25519" ? generateKeyPairSync("ed25519") : generateKeyPairSync("ec", { namedCurve: "P-256" });
+      await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
+      const ch = await auth!.signature.challenge(p.name);
+      const signed = signLogin(kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string, p.name, ch.nonce);
+      const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signed });
+      expect(r.principal.id).toBe(p.id);
+      await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signed })).rejects.toBeInstanceOf(AuthError);
+    });
+  }
+
+  db()("refuses a signature for another user, a stale timestamp, and an unknown key", async () => {
+    const { p } = await enrolledUser();
+    const other = await enrolledUser();
+    const kp = generateKeyPairSync("ed25519");
+    await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
+    const priv = kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    let ch = await auth!.signature.challenge(other.p.name);
+    await expect(auth!.loginSignature({ username: other.p.name, challengeId: ch.challengeId, ...signLogin(priv, other.p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
+    ch = await auth!.signature.challenge(p.name);
+    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(priv, p.name, ch.nonce, Math.floor(Date.now() / 1000) - 600) })).rejects.toBeInstanceOf(AuthError);
+    const stranger = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    ch = await auth!.signature.challenge(p.name);
+    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(stranger, p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
+  });
+
+  db()("accepts a client certificate of the company CA and refuses a self-signed one", async () => {
+    const { p } = await enrolledUser();
+    await expect(auth!.signature.addKey(p.id, fx("rogue.pem"))).rejects.toThrow(/CA aziendale/);
+    // the fixture certificate is the same in every run: remove the copy of a previous run
+    const spki = new X509Certificate(fx("client.pem")).publicKey.export({ type: "spki", format: "der" });
+    await sql!`delete from public_keys where fingerprint = ${sha256hex(spki)}`;
+    const key = await auth!.signature.addKey(p.id, fx("client.pem"), "Certificato aziendale");
+    expect(key.kind).toBe("x509");
+    expect(key.notAfter!.getFullYear()).toBeGreaterThan(2030);
+    const ch = await auth!.signature.challenge(p.name);
+    const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(fx("client-key.pem"), p.name, ch.nonce) });
+    expect(r.principal.id).toBe(p.id);
+  });
+
+  db()("answers a challenge for an unknown user too (no user enumeration)", async () => {
+    const ch = await auth!.signature.challenge(`nessuno-${run}`);
+    expect(ch.nonce).toHaveLength(43);
+  });
+});
+
+describe("passkeys", () => {
+  db()("registers a passkey and logs in with it, with and without username", async () => {
+    const { p } = await enrolledUser();
+    const device = new SoftAuthenticator(ORIGIN, "localhost");
+    const reg = await auth!.passkeys.registrationOptions(p);
+    const info = await auth!.passkeys.verifyRegistration(p.id, reg.challengeId, device.register(reg.options), "Portatile");
+    expect(info.name).toBe("Portatile");
+
+    const discoverable = await auth!.passkeys.authenticationOptions();
+    const r1 = await auth!.loginPasskey(discoverable.challengeId, device.authenticate(discoverable.options));
+    expect(r1.principal.id).toBe(p.id);
+
+    const named = await auth!.passkeys.authenticationOptions(p.name);
+    expect(named.options.allowCredentials?.map((c) => c.id)).toEqual([device.id]);
+    const r2 = await auth!.loginPasskey(named.challengeId, device.authenticate(named.options));
+    expect(r2.principal.id).toBe(p.id);
+  });
+
+  db()("refuses a response from another origin and a replayed challenge", async () => {
+    const { p } = await enrolledUser();
+    const device = new SoftAuthenticator(ORIGIN, "localhost");
+    const reg = await auth!.passkeys.registrationOptions(p);
+    await auth!.passkeys.verifyRegistration(p.id, reg.challengeId, device.register(reg.options));
+    const o = await auth!.passkeys.authenticationOptions();
+    await expect(auth!.loginPasskey(o.challengeId, device.authenticate(o.options, "https://phishing.example"))).rejects.toBeInstanceOf(AuthError);
+    const o2 = await auth!.passkeys.authenticationOptions();
+    const resp = device.authenticate(o2.options);
+    await auth!.loginPasskey(o2.challengeId, resp);
+    await expect(auth!.loginPasskey(o2.challengeId, resp)).rejects.toBeInstanceOf(AuthError);
+  });
+});
+
+describe("authorization", () => {
+  db()("admins see every vault; members see grants and their own cell; API scopes cap the grant", async () => {
+    const [v1] = await sql!<{ id: string }[]>`
+      insert into vaults (id, kind, slug, name, chunks_partition) values (${`vlt_a${run}`}, 'space', ${`az-a-${run}`}, 'A', ${`chunks_ta${run}`}) returning id`;
+    const [v2] = await sql!<{ id: string }[]>`
+      insert into vaults (id, kind, slug, name, chunks_partition) values (${`vlt_b${run}`}, 'space', ${`az-b-${run}`}, 'B', ${`chunks_tb${run}`}) returning id`;
+    const admin = await auth!.principals.createUser({ username: uname(), displayName: "Admin", role: "admin" });
+    const member = await auth!.principals.createUser({ username: uname(), displayName: "Membro" });
+    const [cell] = await sql!<{ id: string }[]>`
+      insert into vaults (id, kind, owner, slug, name, chunks_partition) values (${`vlt_c${run}`}, 'cell', ${`user:${member.id}`}, ${`az-c-${run}`}, 'Cella', ${`chunks_tc${run}`}) returning id`;
+    const api = await auth!.principals.createApiAccount({ name: `bot-${run}`, scopes: ["read"] });
+    await auth!.access.grant(member.id, v1!.id, "write", admin.id);
+    await auth!.access.grant(api.id, v1!.id, "admin", admin.id);
+
+    const ca = await auth!.access.context(admin);
+    expect(Access.can(ca, "vault.admin", v2!.id)).toBe(true);
+    expect(Access.can(ca, "admin.users")).toBe(true);
+
+    const cm = await auth!.access.context(member);
+    expect(Access.can(cm, "vault.write", v1!.id)).toBe(true);
+    expect(Access.can(cm, "vault.curate", v1!.id)).toBe(false);
+    expect(Access.can(cm, "vault.read", v2!.id)).toBe(false);
+    expect(Access.can(cm, "vault.admin", cell!.id)).toBe(true);
+    expect(Access.can(cm, "admin.users")).toBe(false);
+    expect(Access.toReader(cm).vaults.sort()).toEqual([v1!.id, cell!.id].sort());
+
+    const capi = await auth!.access.context(api);
+    expect(Access.can(capi, "vault.read", v1!.id)).toBe(true);
+    expect(Access.can(capi, "vault.write", v1!.id)).toBe(false); // read scope caps the admin grant
+    expect(() => Access.require(capi, "admin.users")).toThrow(AuthError);
+  });
+});
+
+describe("bootstrap", () => {
+  db()("creates the first administrator only once", async () => {
+    // other tests created admins: bootstrap must refuse
+    await expect(auth!.bootstrapAdmin(uname(), "Secondo")).rejects.toThrow(/già un amministratore/);
+  });
+});

@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.base.json",
+  "include": ["packages/shared/src", "packages/db/src", "packages/models/src", "packages/tasks/src", "packages/blobs/src", "packages/brain/src", "packages/auth/src", "packages/server/src", "packages/parsers/src", "packages/ingest/src", "packages/hive/src", "packages/mcp/src", "packages/metrics/src", "packages/*/test", "bench", "scripts"]
+}

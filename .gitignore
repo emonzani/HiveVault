@@ -6,8 +6,10 @@ bench/**/out/
 *.log
 .DS_Store
 
-.claude/settings.local.json
 packages/web/e2e/.state/
 packages/web/e2e/.results/
 packages/web/e2e/.report/
 *.gguf
+packages/auth/test/fixtures/*.pem
+.claude/
+AGENTS.local.md

@@ -1,0 +1,15 @@
+{
+  "name": "hivevault",
+  "version": "0.6.0",
+  "description": "HiveVault for cloud agents: MCP server of the company memory (search, read with a token budget, links, timeline, citations, notes) and the skills to query it and to load documents.",
+  "author": { "name": "The HiveVault community" },
+  "license": "MIT",
+  "keywords": ["hivevault", "memory", "mcp", "knowledge-base", "self-hosted"],
+  "mcpServers": {
+    "hivevault": {
+      "type": "http",
+      "url": "${HIVEVAULT_URL}/mcp",
+      "headers": { "Authorization": "Bearer ${HIVEVAULT_API_KEY}" }
+    }
+  }
+}

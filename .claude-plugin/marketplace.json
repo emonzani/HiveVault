@@ -1,0 +1,12 @@
+{
+  "name": "hivevault",
+  "owner": { "name": "The HiveVault community" },
+  "plugins": [
+    {
+      "name": "hivevault",
+      "source": "./",
+      "description": "MCP server and skills for HiveVault, the self-hosted memory of the company."
+    }
+  ],
+  "metadata": { "description": "Agent plugin for HiveVault, a self-hosted company memory." }
+}

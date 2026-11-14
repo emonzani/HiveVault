@@ -1,0 +1,45 @@
+{
+  "name": "hivevault",
+  "version": "0.0.1",
+  "private": true,
+  "description": "HiveVault - hive memory server for companies, based on the LLM-Wiki pattern",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "db:up": "docker compose up -d postgres pgbouncer",
+    "db:migrate": "tsx packages/db/src/cli.ts migrate",
+    "corpus": "tsx bench/corpus/generate.ts",
+    "spike:a": "tsx bench/spike-a/run.ts",
+    "spike:c": "tsx bench/spike-c/run.ts",
+    "spike:d": "tsx bench/spike-d/run.ts",
+    "web:dev": "npm run dev -w @cb/web",
+    "web:build": "npm run build -w @cb/web",
+    "bench:phase1": "tsx bench/phase1/run.ts",
+    "bench:compile": "tsx bench/compile/run.ts",
+    "spike:c2": "tsx bench/spike-c2/run.ts",
+    "start": "tsx packages/server/src/index.ts",
+    "cb": "tsx packages/server/src/cli.ts",
+    "e2e": "npm run e2e -w @cb/web",
+    "backup": "tsx scripts/backup.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@cb/brain": "0.0.1"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

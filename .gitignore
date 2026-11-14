@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+data/
+bench/**/out/
+*.log
+.DS_Store
+
+.claude/settings.local.json
+packages/web/e2e/.state/
+packages/web/e2e/.results/
+packages/web/e2e/.report/
+*.gguf

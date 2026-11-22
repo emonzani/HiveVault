@@ -1,3 +1,5 @@
+not production ready, require maaaany tests.
+
 # HiveVault
 
 Self-hosted memory server for a company, organized as a **hive memory**: one vault for each person, edge, team and project, and shared company spaces above them. Documents stay on the server. Knowledge is compiled into linked Markdown pages and is optimized for cloud agents (MCP, token budgets, stable citations).

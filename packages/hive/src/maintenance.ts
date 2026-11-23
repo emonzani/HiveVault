@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import type { Sql, TransactionSql } from "@cb/db";
 import { createLogger } from "@cb/shared";
-import { CLASSIFICATIONS, PERSONAL, classificationLevel, documentCodes, maskCode, normalizeTitle, pageFolder, PageStore, PageVersionError, shortForms, type Page } from "@cb/brain";
+import { CLASSIFICATIONS, PERSONAL, classificationLevel, documentCodes, extractCitations, maskCode, normalizeTitle, pageFolder, PageStore, PageVersionError, reliability, shortForms, type Page } from "@cb/brain";
 import { claimHash, NOTE } from "./claims.ts";
 import { NameAutomaton } from "./matcher.ts";
 import { upsertCuratorItem } from "./promote.ts";
@@ -458,6 +458,38 @@ export interface LintReport {
   brokenLinks: number;
   stale: number;
   contradictions: number;
+  review: number;
+}
+
+/**
+ * Pages past their review date (`reliability`): an explicit `review_after` / `review_every` in the
+ * frontmatter, or the default of the vault for their type. Read 1000 pages at a time.
+ */
+export async function pagesToReview(sql: Sql, vaultId: string, today?: string): Promise<{ id: string; title: string; classification: number; reviewAfter: string }[]> {
+  const [v] = await sql<{ days: Record<string, unknown> }[]>`select review_days as days from vaults where id = ${vaultId}`;
+  const days = v?.days ?? {};
+  const typed = Object.keys(days).filter((k) => Number(days[k]) > 0);
+  const out: { id: string; title: string; classification: number; reviewAfter: string }[] = [];
+  for (let after = ""; ; ) {
+    const rows = await sql<{ id: string; title: string; type: string; body: string; frontmatter: Record<string, unknown>; classification: number; createdAt: string }[]>`
+      select id, title, type, body, frontmatter, classification, to_char(created_at, 'YYYY-MM-DD') as "createdAt" from pages
+      where vault_id = ${vaultId} and ${sql.unsafe(notGenerated())} and split_part(type, '/', 1) = any(${EDITABLE})
+        and (frontmatter ? 'review_after' or frontmatter ? 'review_every' or type = any(${typed}) or split_part(type, '/', 1) = any(${typed}))
+        and id > ${after}
+      order by id limit 1000`;
+    if (!rows.length) break;
+    const ids = [...new Set(rows.flatMap((r) => extractCitations(r.body).map((c) => c.source)).filter((s) => s.startsWith("src_")))];
+    const dates = new Map(
+      ids.length ? (await sql<{ id: string; d: string }[]>`select id, to_char(created_at, 'YYYY-MM-DD') as d from sources where id = any(${ids})`).map((s) => [s.id, s.d] as [string, string]) : [],
+    );
+    for (const r of rows) {
+      const rel = reliability({ type: r.type, body: r.body, frontmatter: r.frontmatter, createdAt: r.createdAt, sourceDates: dates, reviewDays: days, ...(today ? { today } : {}) });
+      if (rel.reviewDue && rel.reviewAfter) out.push({ id: r.id, title: r.title, classification: r.classification, reviewAfter: rel.reviewAfter });
+    }
+    if (rows.length < 1000) break;
+    after = rows.at(-1)!.id;
+  }
+  return out;
 }
 
 /**
@@ -506,7 +538,19 @@ export async function lintVault(sql: Sql, pages: PageStore, vaultId: string): Pr
     });
   }
 
-  const listed = [...orphans, ...broken, ...stale];
+  // pages past their review date: one curator item each (not "personale": the queue is for curators)
+  const review = await pagesToReview(sql, vaultId);
+  const fps: string[] = [];
+  for (const r of review.filter((x) => x.classification !== PERSONAL)) {
+    const fp = claimHash(`${vaultId}|review|${r.id}|${r.reviewAfter}`);
+    fps.push(fp);
+    const item = await upsertCuratorItem(sql, vaultId, "review", fp, normalizeTitle(r.title), null, { title: r.title, pageId: r.id, reviewAfter: r.reviewAfter });
+    if (item.status === "open") await sql`update curator_items set page_id = ${r.id} where id = ${item.id} and page_id is distinct from ${r.id}`;
+  }
+  // a page confirmed or changed meanwhile is no longer due
+  await sql`update curator_items set status = 'superseded' where space_id = ${vaultId} and kind = 'review' and status = 'open' and fingerprint <> all(${fps})`;
+
+  const listed = [...orphans, ...broken, ...stale, ...review];
   const classification = listed.length ? Math.max(...listed.map((x) => x.classification)) : 0;
   const section = (title: string, lines: string[], empty: string) => [`## ${title}`, ...(lines.length ? lines : [`Nessuna: ${empty}.`]), ""];
   const md = [
@@ -515,7 +559,7 @@ export async function lintVault(sql: Sql, pages: PageStore, vaultId: string): Pr
     `type: note/maintenance`,
     `classification: ${CLASSIFICATIONS[classification]}`,
     `tags: ["manutenzione"]`,
-    `tldr: "Controlli del ciclo notturno: ${orphans.length} orfane, ${broken.length} link rotti, ${stale.length} da aggiornare, ${contra.length} contraddizioni."`,
+    `tldr: "Controlli del ciclo notturno: ${orphans.length} orfane, ${broken.length} link rotti, ${stale.length} da aggiornare, ${review.length} da ricontrollare, ${contra.length} contraddizioni."`,
     `---`,
     `# Manutenzione del vault`,
     ``,
@@ -524,10 +568,11 @@ export async function lintVault(sql: Sql, pages: PageStore, vaultId: string): Pr
     ...section("Pagine orfane", orphans.map((o) => `- [[${o.title}]]`), "ogni pagina ha almeno un link in entrata"),
     ...section("Link rotti", broken.map((b) => `- [[${b.title}]] → ${b.target.replace(/^\[\[|\]\]$/g, "")}`), "nessun link verso pagine inesistenti"),
     ...section("Pagine da aggiornare", stale.map((s) => `- [[${s.title}]] (una sorgente è più recente)`), "nessuna"),
+    ...section("Pagine da ricontrollare", review.map((r) => `- [[${r.title}]] (dal ${r.reviewAfter})`), "nessuna ha superato la data di ricontrollo"),
     ...section("Contraddizioni", contra.map((c) => `- ${c.subject} · ${c.predicate}: ${[...new Set(c.values.map((v) => v.value))].join(" / ")}`), "nessuna"),
   ].join("\n");
   await pages.upsert({ vaultId, markdown: md, path: "_inbox/manutenzione.md", author: "dream:lint" });
-  return { orphans: orphans.length, brokenLinks: broken.length, stale: stale.length, contradictions: contra.length };
+  return { orphans: orphans.length, brokenLinks: broken.length, stale: stale.length, contradictions: contra.length, review: review.length };
 }
 
 // ---------------------------------------------------------------------------

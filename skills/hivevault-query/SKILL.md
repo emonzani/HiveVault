@@ -22,6 +22,9 @@ HiveVault is the self-hosted memory of the company. Documents (PDF, email, Offic
 5. **Relations and history.** `brain_neighbors` for who works with whom, projects of a client, pages that cite a page. `brain_timeline(entity)` for dated events, newest first.
 6. **Verify.** `brain_source("src_…#c3")` returns the extracted text of a cited passage. Use it before you state a number, a date or a commitment that matters.
 7. **Short factual questions.** `brain_ask` lets the local model answer from the best pages, with citations. Check important points with step 6.
+8. **Check a statement.** `brain_verify(claim)` gives a verdict (supportata, in parte, contraddetta, non verificabile) with the citations for and against. It also searches the subject without the values of the statement, to find sources that say something else. Check the citations with step 6 before you rely on the verdict.
+
+`brain_read` and `brain_search` give the **reliability** of a page: "alta", "media" or "bassa", with the cited sources, open conflicts, the confirmation by a person and the review date. For a page with "bassa" or "da ricontrollare", verify the points you use with step 6 and say that the page may be old.
 
 Budget rule of thumb: one search (≤ 2000 tokens), then two or three reads at 1000–1500 tokens. Do not read whole pages "just in case".
 

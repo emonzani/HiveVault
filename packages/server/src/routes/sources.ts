@@ -216,13 +216,48 @@ export function sourceRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, 
     },
   );
 
+  /**
+   * A refusal the web app answers with a second question: `cited` (offer the retraction),
+   * `mass_change` (confirm again). Other errors as usual.
+   */
+  const askAgain = (reply: { status: (n: number) => { send: (b: unknown) => unknown } }) => (e: unknown) => {
+    if (e instanceof SourceError && (e.code === "cited" || e.code === "mass_change")) return reply.status(409).send({ error: { code: e.code, message: e.message } }) as never;
+    return sourceError(e);
+  };
+
   /** Deletes the source, its members, chunks, compiled pages and original files. */
-  app.delete<{ Params: { id: string } }>("/api/sources/:id", async (req) => {
+  app.delete<{ Params: { id: string } }>("/api/sources/:id", async (req, reply) => {
     const { a, vaultId } = await owned(req, req.params.id);
-    const r = await ingest.remove(req.params.id).catch(sourceError);
+    let refused: unknown = null;
+    const r = await ingest.remove(req.params.id).catch((e) => {
+      refused = e;
+      return null;
+    });
+    if (!r) return askAgain(reply)(refused);
     await auth.audit.writeNow({ principalId: a.principal.id, action: "source.delete", resource: req.params.id, ...meta(req), data: { vault: vaultId, ...r } });
     return r;
   });
+
+  /**
+   * Retracts a source that other pages cite: the lines only it supports leave those pages, then
+   * the source goes. Curators of the vault (or the person who added it). `confirm`: the second
+   * yes of a mass change.
+   */
+  app.post<{ Params: { id: string }; Body: { confirm?: boolean } | undefined }>(
+    "/api/sources/:id/retract",
+    { schema: { body: { type: ["object", "null"], properties: { confirm: { type: "boolean" } }, additionalProperties: false } } },
+    async (req, reply) => {
+      const { a, vaultId } = await owned(req, req.params.id);
+      let refused: unknown = null;
+      const r = await ingest.retract(req.params.id, { confirm: req.body?.confirm === true, by: a.principal.id }).catch((e) => {
+        refused = e;
+        return null;
+      });
+      if (!r) return askAgain(reply)(refused);
+      await auth.audit.writeNow({ principalId: a.principal.id, action: "source.retract", resource: req.params.id, ...meta(req), data: { vault: vaultId, ...r } });
+      return r;
+    },
+  );
 
   app.post<{ Params: { id: string } }>("/api/sources/:id/compile", async (req) => {
     const { vaultId } = await readable(req, req.params.id);

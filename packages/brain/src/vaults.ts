@@ -15,6 +15,8 @@ export interface Vault {
   vectorIndex: VectorIndexKind;
   chunksPartition: string;
   version: number;
+  /** Default review period in days by kind or type of page ("entity": 180): see reliability.ts. */
+  reviewDays: Record<string, number>;
 }
 
 export interface CreateVault {
@@ -29,7 +31,7 @@ export interface CreateVault {
 }
 
 const COLS = `id, kind, owner, slug, name, schema_md as "schemaMd", default_classification as "defaultClassification",
-  vector_index as "vectorIndex", chunks_partition as "chunksPartition", version`;
+  vector_index as "vectorIndex", chunks_partition as "chunksPartition", version, review_days as "reviewDays"`;
 
 /**
  * Vector index expressions. Queries must use exactly the same expressions, or Postgres does

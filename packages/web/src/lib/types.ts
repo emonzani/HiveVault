@@ -94,6 +94,18 @@ export interface FullPage {
   /** The page is in the reader's own personal vault. */
   personalOwner?: boolean;
   agentReadable: boolean;
+  /** Computed when read: sources, conflicts, confirmation, review date (compiled pages only). */
+  reliability?: Reliability | null;
+}
+
+export interface Reliability {
+  sources: number;
+  conflicts: number;
+  verified: { by: string; at: string } | null;
+  newest: string | null;
+  reviewAfter: string | null;
+  reviewDue: boolean;
+  level: "alta" | "media" | "bassa";
 }
 
 export interface Backlink {

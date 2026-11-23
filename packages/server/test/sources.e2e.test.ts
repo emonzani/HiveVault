@@ -229,6 +229,56 @@ Vedi.^[${id}#c1]` });
     expect(a).toBeTruthy();
   });
 
+  db()("retract: a cited document leaves the pages that cite it, then goes (A1)", async () => {
+    const v = await vaults!.create({ kind: "space", slug: `srcret-${run}`, name: "Ret" });
+    const writer = await user("write", v.id);
+    const curator = await user("curate", v.id);
+    const a = (await writer.upload(v.id, [{ name: "a.md", data: Buffer.from(`# Offerta A ${run}\n\nSede a Milano, 40 dipendenti.`) }])).json().sources[0].id as string;
+    const b = (await writer.upload(v.id, [{ name: "b.md", data: Buffer.from(`# Offerta B ${run}\n\nSettore logistica, 40 dipendenti.`) }])).json().sources[0].id as string;
+    await waitLevel(writer, a, 2);
+    await waitLevel(writer, b, 2);
+    const pages = new PageStore(sql!, { minTokens: 1 });
+    const acme = `---\ntitle: Acme ${run}\ntype: entity/company\nsources: [${a}, ${b}]\n---\n# Acme ${run}\n\n## Stato attuale\n\n- Sede: Milano ^[${a}#c0]\n- Dipendenti: 40 ^[${a}#c0] ^[${b}#c0]\n- Settore: logistica ^[${b}#c0]\n\n> [!conflict] Fatturato\n> - 10 M ^[${a}#c0]\n> - 12 M ^[${b}#c0]\n`;
+    const p1 = await pages.upsert({ vaultId: v.id, markdown: acme.replace("Milano", "Roma") });
+    await pages.upsert({ vaultId: v.id, id: p1.page.id, markdown: acme }); // version 1 cites A too
+    const p2 = await pages.upsert({ vaultId: v.id, markdown: `---\ntitle: Solo A ${run}\ntype: concept\n---\nUn fatto. ^[${a}#c0]\n` });
+    const p3 = await pages.upsert({ vaultId: v.id, markdown: `---\ntitle: Nota ${run}\n---\nScritto da una persona.\n\nDetto in A. ^[${a}#c0]\n` });
+
+    // delete refuses with a code the web app answers with the retraction
+    const del = await writer.call("DELETE", `/api/sources/${a}`);
+    expect(del.statusCode).toBe(409);
+    expect(del.json().error.code).toBe("cited");
+
+    const r = await curator.call("POST", `/api/sources/${a}/retract`, {});
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ sources: 1, rewritten: 2, deleted: 1, lines: 4, checkpoint: null });
+    const body = (await PageStore.get(sql!, p1.page.id))!;
+    expect(body.body).not.toContain(a);
+    expect(body.body).not.toContain("Sede");
+    expect(body.body).toContain(`- Dipendenti: 40 ^[${b}#c0]`);
+    expect(body.body).toContain(`- Fatturato: 12 M ^[${b}#c0]`);
+    expect(body.body).not.toContain("[!conflict]");
+    expect(body.frontmatter.sources).toEqual([b]);
+    expect(await PageStore.get(sql!, p2.page.id)).toBeUndefined();
+    const note = (await PageStore.get(sql!, p3.page.id))!;
+    expect(note.body).toContain("Scritto da una persona.");
+    expect(note.body).not.toContain(a);
+    // no earlier version of the rewritten pages keeps the retracted text
+    expect(await sql!`select 1 from page_versions where page_id = any(${[p1.page.id, p3.page.id]}) and body like ${`%${a}%`}`).toHaveLength(0);
+    expect((await writer.call("GET", `/api/sources/${a}`)).statusCode).toBe(404);
+    expect(await sql!`select 1 from audit_log where resource = ${a} and action = 'source.retract'`).toHaveLength(1);
+
+    // a retraction of more than a fifth of the vault asks again, then saves a checkpoint first
+    for (let i = 0; i < 6; i++) await pages.upsert({ vaultId: v.id, markdown: `---\ntitle: Dip ${i} ${run}\ntype: concept\n---\nFatto ${i}. ^[${b}#c0]\n` });
+    const mass = await curator.call("POST", `/api/sources/${b}/retract`, {});
+    expect(mass.statusCode).toBe(409);
+    expect(mass.json().error.code).toBe("mass_change");
+    const ok = await curator.call("POST", `/api/sources/${b}/retract`, { confirm: true });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().deleted).toBe(7); // the 6 pages and Acme, which cited only B now
+    expect(ok.json().checkpoint).toMatch(/^chk_/);
+  });
+
   db()("the same bytes as a source the caller cannot read: a generic answer, the source does not change", async () => {
     const v = await vaults!.create({ kind: "space", slug: `srcdup-${run}`, name: "D" });
     const writer = await user("write", v.id, 1);

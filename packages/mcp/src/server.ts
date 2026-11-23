@@ -1,5 +1,5 @@
 /**
- * MCP server of HiveVault (plan §7.1): 10 tools, 4 resource templates, 6 prompts. One server
+ * MCP server of HiveVault (plan §7.1): 11 tools, 4 resource templates, 6 prompts. One server
  * object per HTTP request (stateless streamable HTTP), bound to the calling API account.
  * Tool descriptions are short and precise: fewer definition tokens, more reliable choices.
  */
@@ -19,6 +19,7 @@ import {
   brainSearch,
   brainSource,
   brainTimeline,
+  brainVerify,
   readerOf,
   ToolError,
   type ToolContext,
@@ -148,6 +149,21 @@ export function createMcpServer(ctx: ToolContext, o: { version?: string } = {}):
         annotations: { ...READ, idempotentHint: false },
       },
       (a) => run(() => brainAsk(ctx, a)),
+    );
+    server.registerTool(
+      "brain_verify",
+      {
+        title: "Verifica un'affermazione",
+        description:
+          "Il modello locale controlla un'affermazione sulla memoria: cerca anche le prove contrarie (stesso argomento senza i valori) e risponde supportata, in parte, contraddetta o non verificabile, con le citazioni a favore e contro.",
+        inputSchema: {
+          claim: z.string().min(5).max(500).describe("L'affermazione da verificare, per esempio «Il contratto con ACME scade il 2027-03-31»"),
+          vaults: z.array(z.string()).max(20).optional(),
+          max_tokens: z.number().int().min(500).max(8000).optional().describe("Budget del contesto letto (default 4000)"),
+        },
+        annotations: { ...READ, idempotentHint: false },
+      },
+      (a) => run(() => brainVerify(ctx, a)),
     );
   }
 

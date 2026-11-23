@@ -60,6 +60,8 @@ Scrivi una domanda o delle parole chiave. La ricerca trova sia le parole uguali 
 - I numeri tra parentesi sono **citazioni**: aprono il punto del documento da cui viene l'informazione.
 - Un riquadro **conflitto** indica due fonti che dicono cose diverse. Un curatore deciderà.
 - **Storico** mostra le versioni e le differenze. **Ripristina questa versione** riporta una versione precedente; lo storico resta.
+- Sotto il titolo c'è l'**affidabilità** della pagina: alta, media o bassa. Passa sopra per i motivi: quante fonti cita, i conflitti aperti, chi l'ha confermata e quando va ricontrollata. Una pagina con un conflitto, senza fonti o oltre la data di ricontrollo ha affidabilità bassa.
+- **È corretta** conferma che la pagina dice il vero. La pagina conta come controllata da oggi. Una conferma vale finché non arriva un documento più recente.
 
 ## 7. Scrivere
 
@@ -81,6 +83,10 @@ Lo stato di ogni documento cambia sotto i tuoi occhi: in coda, letto, cercabile,
 
 Le email e i loro allegati diventano almeno **riservato**. L'amministratore può disattivare il caricamento delle email: allora il file resta «non supportato». Non caricare la posta di altre persone senza autorizzazione.
 
+Per eliminare un documento selezionalo nella inbox e premi **Elimina**. Se altre pagine lo citano, HiveVault propone di **ritirarlo**: le frasi che cita solo quel documento escono dalle pagine, le altre perdono la sua citazione, le pagine compilate senza altre fonti vanno via. Anche le versioni precedenti che lo citano vanno via. Se il ritiro cambia più di un quinto del vault, HiveVault chiede una seconda conferma e salva prima un punto di ripristino.
+
+Il ciclo notturno scarica di nuovo i documenti aggiunti da un link, ogni 7 giorni. Se il contenuto è cambiato, diventa una nuova versione del documento e le pagine si aggiornano.
+
 Le foto e i PDF scansionati passano dall'OCR, se l'amministratore ha configurato un modello OCR. Senza OCR il documento mostra «Serve l'OCR»: lo trovi per nome, ma non per il testo.
 
 ## 9. Coda dei curatori
@@ -90,6 +96,7 @@ Se sei curatore di uno spazio, la **Coda dei curatori** mostra:
 - **Conflitti**: due celle dicono valori diversi. Scegli il valore giusto o scrivine uno nuovo.
 - **Duplicati**: due pagine parlano della stessa cosa. Scegli la pagina da tenere.
 - **Proposte dell'agente cloud**: l'agente cloud propone una modifica. Guarda le differenze, poi **Approva e applica** o **Rifiuta**.
+- **Da ricontrollare**: la pagina ha superato la sua data di ricontrollo. Leggila, correggila se serve, poi premi **È corretta**.
 - **Modifiche di massa**: il ciclo notturno vuole togliere molte pagine dell'alveare tutte insieme (più di un quinto). Succede se una cella è stata scollegata o svuotata per errore. **Conferma la rimozione** se è giusto, altrimenti **Tieni le pagine**.
 
 ## 10. Il mio account

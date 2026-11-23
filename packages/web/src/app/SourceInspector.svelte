@@ -4,7 +4,7 @@
   import { untrack } from "svelte";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
-  import { api } from "../lib/api.ts";
+  import { api, ApiError } from "../lib/api.ts";
   import { sourceEvents } from "../lib/events.svelte.ts";
   import { ALL_CLASSIFICATIONS, bytes, nf, valueLabel, WARNING_LABEL } from "../lib/format.ts";
   import { session } from "../lib/session.svelte.ts";
@@ -101,11 +101,32 @@
     const extra = [detail!.children?.length ? `i ${detail!.children.length} allegati` : "", detail!.compiledPage ? t("la pagina compilata") : ""].filter(Boolean).join(" e ");
     if (!confirm(t("Eliminare «{name}»{x}? Il file originale viene cancellato dal server. L'operazione non si può annullare.", { name, x: extra ? t(" con {extra}", { extra }) : "" }))) return;
     return act(async () => {
-      await api.del(`/api/sources/${sid()}`);
+      try {
+        await api.del(`/api/sources/${sid()}`);
+      } catch (e) {
+        // other pages cite the document: offer to retract it from them
+        if (!(e instanceof ApiError) || e.code !== "cited") throw e;
+        if (!confirm(t("{message}\n\nRitirare il documento? Le frasi che cita solo lui vengono tolte dalle pagine, le altre perdono la sua citazione. L'operazione non si può annullare.", { message: e.message }))) return;
+        await retract(name, false);
+        return;
+      }
       ui.toast(t("\"{name}\" eliminato.", { name }), "ok");
       inspect.touch(null);
     });
   };
+  async function retract(name: string, confirmed: boolean): Promise<void> {
+    let r: { rewritten: number; deleted: number };
+    try {
+      r = await api.post<{ rewritten: number; deleted: number }>(`/api/sources/${sid()}/retract`, { confirm: confirmed });
+    } catch (e) {
+      // a mass change asks once more
+      if (confirmed || !(e instanceof ApiError) || e.code !== "mass_change") throw e;
+      if (confirm(e.message)) await retract(name, true);
+      return;
+    }
+    ui.toast(t("\"{name}\" ritirato: {n} pagine riscritte, {d} eliminate.", { name, n: r.rewritten, d: r.deleted }), "ok");
+    inspect.touch(null);
+  }
 </script>
 
 <div class="si">

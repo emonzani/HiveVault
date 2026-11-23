@@ -33,6 +33,10 @@ await dispatcher.addEndpoint(
     script: (req: ChatRequest) => {
       lastPrompt = String(req.messages.at(-1)?.content ?? "");
       const id = /<pagina id="([^"]+)"/.exec(lastPrompt)?.[1] ?? "x";
+      // brain_verify: a JSON verdict, one citation from the context and one invented
+      if (String(req.messages[0]?.content ?? "").startsWith("Verifichi")) {
+        return { content: JSON.stringify({ verdetto: "supportata", motivo: "La pagina dice 120 postazioni.", a_favore: [id, "inventato_9"], contro: [] }), usage: { promptTokens: 300, completionTokens: 30 } };
+      }
       return { content: `Il cliente ha 120 postazioni ^[${id}] ^[inventato_123].`, usage: { promptTokens: 300, completionTokens: 20 } };
     },
   }),
@@ -109,7 +113,7 @@ describe("MCP server", () => {
     expect(searchTool.inputSchema.properties).toHaveProperty("query");
     expect(searchTool.inputSchema.required).toContain("query");
     const tools = listed.map((t) => t.name).sort();
-    expect(tools).toEqual(["brain_ask", "brain_capture", "brain_journal", "brain_neighbors", "brain_overview", "brain_propose_edit", "brain_read", "brain_search", "brain_source", "brain_timeline"]);
+    expect(tools).toEqual(["brain_ask", "brain_capture", "brain_journal", "brain_neighbors", "brain_overview", "brain_propose_edit", "brain_read", "brain_search", "brain_source", "brain_timeline", "brain_verify"]);
     expect((await client.listPrompts()).prompts.map((p) => p.name).sort()).toEqual(["buongiorno", "chiudi-sessione", "cosa-sappiamo-di", "fine-giornata", "prepara-riunione", "stato-cliente"]);
     const resources = (await client.listResources()).resources.map((r) => r.uri);
     expect(resources).toEqual([`brain://mcpv-${run}/index`, `brain://mcpv-${run}/llms.txt`, `brain://mcpv-${run}/changes`]);
@@ -122,11 +126,14 @@ describe("MCP server", () => {
     const search = text(await client.callTool({ name: "brain_search", arguments: { query: `Acme ${run} postazioni` } }));
     expect(search).toContain(`[${acme.page.id}]`);
     expect(search).toMatch(/token/);
+    // A4: every page hit says how reliable it is (one cited document: "media")
+    expect(search).toContain("affidabilità media");
     for (const hidden of [`Riservato ${run}`, `Segreto ${run}`, `Fuori ${run}`]) expect(search).not.toContain(hidden);
 
     const read = text(await client.callTool({ name: "brain_read", arguments: { id: `Acme ${run}`, max_tokens: 300 } }));
     expect(read).toContain("Postazioni: 120");
     expect(read).toContain(`Cita come ^[${acme.page.id}#sezione]`);
+    expect(read).toContain("Affidabilità: media · 1 fonte");
     const denied = await client.callTool({ name: "brain_read", arguments: { id: ris.page.id } });
     expect(denied.isError).toBe(true);
     expect(text(denied)).toMatch(/non trovata/);
@@ -157,6 +164,14 @@ describe("MCP server", () => {
     expect(ask).toContain("inventato_123");
     expect(lastPrompt).not.toContain("margine del 40%");
 
+    // brain_verify (A2): a verdict with the citations of the context; invented ones are dropped
+    const verify = text(await client.callTool({ name: "brain_verify", arguments: { claim: `Acme ${run} ha 120 postazioni` } }));
+    expect(verify).toContain("Verdetto: **supportata**");
+    expect(verify).toContain(`A favore: ^[${acme.page.id}]`);
+    expect(verify).toContain("inventato_9");
+    expect(lastPrompt).toContain(`Affermazione: Acme ${run} ha 120 postazioni`);
+    expect(lastPrompt).not.toContain("margine del 40%");
+
     // read-only account: no writes
     const cap = await client.callTool({ name: "brain_capture", arguments: { title: "Nota", content: "testo" } });
     expect(cap.isError).toBe(true);
@@ -174,6 +189,12 @@ describe("MCP server", () => {
     const { id: writerId, client: writer } = await account(["read", "write"], [v.id], 1);
     const saved = text(await writer.callTool({ name: "brain_capture", arguments: { title: `Sintesi ${run}`, content: `Acme ha 120 postazioni ^[${acme.page.id}].`, vault: `mcpv-${run}` } }));
     expect(saved).toMatch(/Nota salvata: \[pag_/);
+    expect(saved).not.toContain("Attenzione");
+    // A5: links and citations that lead nowhere come back with the answer
+    const broken = text(await writer.callTool({ name: "brain_capture", arguments: { title: `Rotta ${run}`, content: `Vedi [[Inesistente ${run}]] e [[Acme ${run}]]. ^[src_nope#c0]`, vault: `mcpv-${run}`, compile: false } }));
+    expect(broken).toContain(`[[Inesistente ${run}]]`);
+    expect(broken).toContain("^[src_nope]");
+    expect(broken).not.toContain(`[[Acme ${run}]]`);
     const capturedId = (t: string) => /Nota salvata: \[(pag_[0-9A-Z]+)\]/.exec(t)![1]!;
     const [note] = await sql!<{ title: string; path: string; type: string; frontmatter: { captured_by: string } }[]>`select title, path, type, frontmatter from pages where id = ${capturedId(saved)}`;
     expect(note).toMatchObject({ type: "note/capture" });

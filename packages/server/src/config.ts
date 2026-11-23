@@ -35,7 +35,7 @@ export interface ServerConfig {
   /** Bearer token for Prometheus at GET /metrics (empty = administrators only). */
   metricsToken: string;
   /** Dream cycle (plan §5): night window, budget per vault and night, retention. */
-  dream: { enabled: boolean; window: string; minutes: number; tokens: number; compilePerNight: number; useModel: boolean; auditDays: number; taskDays: number };
+  dream: { enabled: boolean; window: string; minutes: number; tokens: number; compilePerNight: number; useModel: boolean; auditDays: number; taskDays: number; linkRefreshDays: number };
   /** Links during the day (crosslink, claims, hive promotion of the changed pages): minutes between passes, 0 = off. */
   linkIntervalMinutes: number;
   /** Sources never asked to compile (imports) compiled while the chat model is free (M3). */
@@ -127,6 +127,8 @@ export function loadServerConfig(): ServerConfig {
       // security events: at least 6 months (Garante, system administrators, 27/11/2008)
       auditDays: numEnv("AUDIT_RETENTION_DAYS", 400, { min: 183 }),
       taskDays: numEnv("TASK_RETENTION_DAYS", 30, { min: 1 }),
+      // documents added from a link are downloaded again after these days (0: never)
+      linkRefreshDays: numEnv("LINK_REFRESH_DAYS", 7, { min: 0 }),
     },
     linkIntervalMinutes: numEnv("LINK_INTERVAL_MINUTES", 5, { min: 0 }),
     idleCompile: boolEnv("IDLE_COMPILE", true),

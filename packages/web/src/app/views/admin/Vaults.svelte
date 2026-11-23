@@ -74,8 +74,12 @@
   }
 
   // --- edit -----------------------------------------------------------------------------
-  let edit = $state<{ name: string; owner: string; schemaMd: string | null; defaultClassification: number; vectorIndex: AdminVault["vectorIndex"] } | null>(null);
+  let edit = $state<{ name: string; owner: string; schemaMd: string | null; defaultClassification: number; vectorIndex: AdminVault["vectorIndex"]; review: Record<string, number | null> | null } | null>(null);
   let schemaLoaded = "";
+  let reviewLoaded = "";
+  /** Kinds of compiled pages with a default review period (days; empty: never). */
+  const REVIEW_KINDS: [string, string][] = [["entity", t("Entità")], ["concept", t("Concetti")], ["decision", t("Decisioni")], ["synthesis", t("Sintesi")]];
+  const reviewBody = (r: Record<string, number | null>) => JSON.stringify(Object.fromEntries(REVIEW_KINDS.map(([k]) => [k, Math.max(0, Math.round(Number(r[k] ?? 0)) || 0)])));
   // the edit card is below the table: it comes into view and takes the focus
   let editor = $state<HTMLElement>();
   let shownFor = "";
@@ -89,9 +93,19 @@
   let feeds = $state<{ cellId: string; types: string[] }[]>([]);
   $effect(() => {
     const v = current;
-    edit = v ? { name: v.name, owner: v.owner ?? "", schemaMd: null, defaultClassification: v.defaultClassification, vectorIndex: v.vectorIndex } : null;
+    edit = v ? { name: v.name, owner: v.owner ?? "", schemaMd: null, defaultClassification: v.defaultClassification, vectorIndex: v.vectorIndex, review: null } : null;
     // SCHEMA.md is not in the list (up to 100 KB per vault): read it with the vault
-    if (v) api.get<{ schemaMd: string }>(`/api/admin/vaults/${v.id}`).then((d) => { if (edit && current?.id === v.id) { edit.schemaMd = d.schemaMd; schemaLoaded = d.schemaMd; } }, () => {});
+    if (v)
+      api.get<{ schemaMd: string; reviewDays?: Record<string, number> }>(`/api/admin/vaults/${v.id}`).then(
+        (d) => {
+          if (!edit || current?.id !== v.id) return;
+          edit.schemaMd = d.schemaMd;
+          schemaLoaded = d.schemaMd;
+          edit.review = Object.fromEntries(REVIEW_KINDS.map(([k]) => [k, d.reviewDays?.[k] ?? null]));
+          reviewLoaded = reviewBody(edit.review);
+        },
+        () => {},
+      );
     feeds = [];
     if (v?.kind === "space") api.get<{ cellId: string; types: string[] }[]>(`/api/admin/vaults/${v.id}/feeds`).then((f) => (feeds = f), () => {});
   });
@@ -107,6 +121,7 @@
     }
     if (edit!.schemaMd !== null && edit!.schemaMd !== schemaLoaded) body.schemaMd = edit!.schemaMd;
     if (edit!.defaultClassification !== v.defaultClassification) body.defaultClassification = edit!.defaultClassification;
+    if (edit!.review && reviewBody(edit!.review) !== reviewLoaded) body.reviewDays = JSON.parse(reviewBody(edit!.review));
     if (edit!.vectorIndex !== v.vectorIndex) {
       if (!confirm(t("Cambiare l'indice vettoriale ricostruisce l'indice della partizione: può richiedere minuti su vault grandi. Continuare?"))) return;
       body.vectorIndex = edit!.vectorIndex;
@@ -114,6 +129,7 @@
     if (!Object.keys(body).length) return ui.toast(t("Nessuna modifica."), "info");
     if (await act("save", () => request("PATCH", `/api/admin/vaults/${v.id}`, body), t("Vault aggiornato."))) {
       if (body.schemaMd !== undefined) schemaLoaded = body.schemaMd as string;
+      if (body.reviewDays !== undefined) reviewLoaded = JSON.stringify(body.reviewDays);
       await load();
     }
   }
@@ -289,6 +305,17 @@
             {#if edit.schemaMd === null}<span class="skeleton" style="height:6rem"></span>
             {:else}<textarea class="input mono" rows="8" maxlength="100000" bind:value={edit.schemaMd}></textarea>{/if}
           </label>
+          {#if edit.review}
+            <fieldset class="review">
+              <legend class="label">{t("Ricontrollo delle pagine (giorni; vuoto: mai)")}</legend>
+              <div class="adm-form">
+                {#each REVIEW_KINDS as [k, l] (k)}
+                  <label class="field"><span class="label">{l}</span><input class="input tabular" type="number" min="0" max="36500" step="1" bind:value={edit.review[k]} /></label>
+                {/each}
+              </div>
+              <p class="dim small">{t("Dopo questi giorni dall'ultima conferma o dall'ultimo documento citato, il ciclo notturno mette la pagina nella coda dei curatori. Una pagina può avere la sua data con review_after o review_every nel frontmatter.")}</p>
+            </fieldset>
+          {/if}
           <div class="adm-bar">
             <Button size="sm" variant="primary" busy={busy === "save"} onclick={save}>{t("Salva")}</Button>
             <Button size="sm" busy={busy === "dream"} onclick={dreamNow}>{t("Ciclo notturno ora")}</Button>
@@ -376,6 +403,13 @@
     gap: 0.5rem;
     padding: 0.4rem 0;
     border-bottom: 1px solid var(--line);
+  }
+  .review {
+    border: 0;
+    padding: 0;
+    margin: 1rem 0 0;
+    display: grid;
+    gap: 0.5rem;
   }
   .schema textarea {
     width: 100%;

@@ -59,6 +59,16 @@ export interface DreamDeps {
   budget?: { minutes?: number; tokens?: number };
   /** Sources compiled (I3) per vault and night from the backlog. */
   compilePerNight?: number;
+  /**
+   * Downloads a link source again (A6): "changed" makes a new source. With `dropReplaced`, the
+   * step also deletes the replaced sources once the new ones are compiled.
+   */
+  refreshLink?: (sourceId: string) => Promise<"same" | "changed" | "failed" | "skipped">;
+  dropReplaced?: (vaultId: string) => Promise<number>;
+  /** Days between two downloads of the same link (0: never). Default 7. */
+  linkRefreshDays?: number;
+  /** Links downloaded per vault and night. Default 20. */
+  linkRefreshPerNight?: number;
   /** Clock (tests). */
   now?: () => Date;
   name?: string;
@@ -315,11 +325,11 @@ export const STEPS: Step[] = [
   },
   {
     name: "lint",
-    title: "Controlli: orfane, link rotti, pagine stantie, contraddizioni",
+    title: "Controlli: orfane, link rotti, pagine stantie, da ricontrollare, contraddizioni",
     async run({ deps, vaultId }): Promise<StepOut> {
       await syncClaims(deps.sql, { vaultIds: [vaultId] });
       const r = await lintVault(deps.sql, deps.pages, vaultId);
-      return { done: true, report: { orfane: r.orphans, "link rotti": r.brokenLinks, "da aggiornare": r.stale, contraddizioni: r.contradictions } };
+      return { done: true, report: { orfane: r.orphans, "link rotti": r.brokenLinks, "da aggiornare": r.stale, "da ricontrollare": r.review, contraddizioni: r.contradictions } };
     },
   },
   {
@@ -402,6 +412,34 @@ export const STEPS: Step[] = [
     async run({ deps, vaultId }): Promise<StepOut> {
       const blobs = deps.readBlob ? await checkBlobs(deps.sql, deps.readBlob, vaultId) : { checked: 0, failed: [] as string[] };
       return { done: true, report: { "originali verificati": blobs.checked, "originali illeggibili": blobs.failed.length, pgbackrest: "non configurato (fase 8)" } };
+    },
+  },
+  {
+    name: "refresh",
+    title: "Nuovo download dei link",
+    async run({ deps, vaultId }): Promise<StepOut> {
+      const days = deps.linkRefreshDays ?? 7;
+      if (!deps.refreshLink || days <= 0) return { done: true, report: { saltato: "non configurato" } };
+      const dropped = deps.dropReplaced ? await deps.dropReplaced(vaultId) : 0;
+      const t = (deps.now ?? (() => new Date()))();
+      const due = new Date(t.getTime() - days * 86400_000).toISOString();
+      // the oldest check first; a link never checked counts from its download
+      const rows = await deps.sql<{ id: string }[]>`
+        select id from sources
+        where vault_id = ${vaultId} and origin = 'link' and parent_id is null and path is not null
+          and not (meta ? 'replacedBy') and status not in ('failed', 'unsupported')
+          and coalesce(meta->>'checkedAt', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) < ${due}
+        order by coalesce(meta->>'checkedAt', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')), id
+        limit ${deps.linkRefreshPerNight ?? 20}`;
+      const out = { uguali: 0, cambiati: 0, "non raggiungibili": 0 };
+      for (const r of rows) {
+        const res = await deps.refreshLink(r.id);
+        if (res === "same") out.uguali++;
+        else if (res === "changed") out.cambiati++;
+        else if (res === "failed") out["non raggiungibili"]++;
+      }
+      metrics.inc("dream_links", { outcome: "changed" }, out.cambiati);
+      return { done: true, report: { ...out, "versioni vecchie eliminate": dropped } };
     },
   },
   {

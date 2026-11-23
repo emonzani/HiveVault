@@ -28,11 +28,11 @@
     id: string;
     spaceId: string;
     vaultName: string;
-    kind: "conflict" | "duplicate" | "lint" | "low_confidence" | "proposal" | "mass_change" | "rectification";
+    kind: "conflict" | "duplicate" | "lint" | "low_confidence" | "proposal" | "mass_change" | "rectification" | "review";
     subject: string;
     predicate: string | null;
     pageId: string | null;
-    data: { title?: string; values?: Value[]; body?: string; before?: string; rationale?: string; by?: string; section?: string | null; a?: { id: string; title: string; tldr?: string }; b?: { id: string; title: string; tldr?: string }; similarity?: number; value?: string; confidence?: number; origin?: string; subjects?: string[]; total?: number; pages?: { id: string; title: string; vaultName: string }[]; sources?: { id: string; name: string; vaultName: string }[] };
+    data: { title?: string; values?: Value[]; body?: string; before?: string; rationale?: string; by?: string; section?: string | null; a?: { id: string; title: string; tldr?: string }; b?: { id: string; title: string; tldr?: string }; similarity?: number; value?: string; confidence?: number; origin?: string; subjects?: string[]; total?: number; pages?: { id: string; title: string; vaultName: string }[]; sources?: { id: string; name: string; vaultName: string }[]; reviewAfter?: string };
     status: string;
     resolution: Record<string, unknown> | null;
     resolvedAt: string | null;
@@ -84,8 +84,8 @@
     }));
   }
   const NL = String.fromCharCode(10);
-  const KINDS: [string, string][] = [["", t("Tutte")], ["conflict", t("Conflitti")], ["proposal", t("Proposte dell'agente cloud")], ["duplicate", t("Duplicati")], ["low_confidence", t("Da verificare")], ["mass_change", t("Modifiche di massa")], ["rectification", t("Rettifiche")]];
-  const KIND: Record<string, string> = { proposal: t("Proposta di modifica"), conflict: t("Conflitto"), duplicate: t("Possibile duplicato"), low_confidence: t("Da verificare"), lint: t("Controllo"), mass_change: t("Modifica di massa"), rectification: t("Rettifica") };
+  const KINDS: [string, string][] = [["", t("Tutte")], ["conflict", t("Conflitti")], ["proposal", t("Proposte dell'agente cloud")], ["duplicate", t("Duplicati")], ["low_confidence", t("Da verificare")], ["mass_change", t("Modifiche di massa")], ["rectification", t("Rettifiche")], ["review", t("Da ricontrollare")]];
+  const KIND: Record<string, string> = { proposal: t("Proposta di modifica"), conflict: t("Conflitto"), duplicate: t("Possibile duplicato"), low_confidence: t("Da verificare"), lint: t("Controllo"), mass_change: t("Modifica di massa"), rectification: t("Rettifica"), review: t("Da ricontrollare") };
   const title = (it: Item) => it.data.title ?? it.subject;
   const open = (e: MouseEvent, id: string) => (e.preventDefault(), ws.open({ kind: "page", id }, target(e)));
   const decision = (it: Item) => {
@@ -93,6 +93,7 @@
     if ("choice" in r) return `scelto «${(it.data.values ?? []).find((v) => v.valueNorm === r.choice)?.value ?? r.choice}»`;
     if ("custom" in r) return t("valore scritto: «{value}»", { value: String(r.custom) });
     if ("keepAll" in r) return t("tutti i valori sono validi");
+    if ("verified" in r) return t("pagina confermata");
     if ("note" in r && r.note) return String(r.note);
     return "chiusa";
   };
@@ -190,6 +191,14 @@
               {#if !it.data.pages?.length && !it.data.sources?.length}<p class="dim small">{t("La pagina non cita fonti che puoi leggere.")}</p>{/if}
               {#if status === "open"}
                 <div class="row"><Button size="sm" busy={busy === it.id} onclick={() => act(it, "resolve", {}, t("Voce chiusa: dalla prossima notte la pagina si ricostruisce dalle fonti."))}>{t("Fonti corrette")}</Button></div>
+              {/if}
+            {:else if it.kind === "review"}
+              <p class="small">{t("La pagina ha superato la data di ricontrollo ({at}): i fatti potrebbero essere cambiati. Leggila, correggila se serve, poi confermala: conta come controllata da oggi.", { at: it.data.reviewAfter ?? "" })}</p>
+              {#if status === "open"}
+                <div class="row">
+                  <Button size="sm" busy={busy === it.id} onclick={() => act(it, "resolve", {}, t("Pagina confermata: conta come controllata da oggi."))}>{t("È corretta")}</Button>
+                  <Button size="sm" variant="quiet" busy={busy === it.id} onclick={() => act(it, "dismiss", {}, t("Voce ignorata."))}>{t("Ignora")}</Button>
+                </div>
               {/if}
             {:else if it.kind === "duplicate" && it.data.a && it.data.b}
               <div class="pair">

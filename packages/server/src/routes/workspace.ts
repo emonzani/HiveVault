@@ -5,7 +5,7 @@
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { Access, AuthError, type AuthService } from "@cb/auth";
-import { openRectification, rectificationTargets, type RectificationTargets } from "@cb/hive";
+import { CuratorError, openRectification, rectificationTargets, verifyPage, type RectificationTargets } from "@cb/hive";
 import {
   backlinks,
   classificationLevel,
@@ -17,6 +17,7 @@ import {
   parseDocument,
   PERSONAL,
   recentPages,
+  reliabilityOf,
   serializeDocument,
   sourceChunks,
   suggest,
@@ -162,8 +163,31 @@ export function workspaceRoutes(app: FastifyInstance, sql: Sql, auth: AuthServic
       rectifiable: generated(page) && a.ctx.isAdmin && a.principal.kind === "user",
       personalOwner: Access.ownsPersonal(a.ctx, page.vaultId),
       agentReadable: await agentReadable(page.vaultId, page.classification),
+      reliability: (await withReader(sql, p, (tx) => reliabilityOf(tx, [page.id]))).get(page.id) ?? null,
     };
   });
+
+  /**
+   * A person confirms that the page is right as it is (A4): it counts as checked from today and
+   * its open "review" items are resolved. `baseVersion`: the version the person read.
+   */
+  app.post<{ Params: { id: string }; Body: { baseVersion: number } }>(
+    "/api/pages/:id/verify",
+    { schema: { body: { type: "object", required: ["baseVersion"], properties: { baseVersion: int(1, 1_000_000) }, additionalProperties: false } } },
+    async (req) => {
+      const { a, p } = reader(req);
+      const user = requireUser(req);
+      const [cur] = await withReader(sql, p, (tx) => tx<{ vaultId: string }[]>`select vault_id as "vaultId" from pages where id = ${req.params.id}`);
+      if (!cur) throw new AuthError("not_found", "Pagina non trovata.");
+      requireAction(req, "vault.write", cur.vaultId);
+      const r = await verifyPage(sql, pages, req.params.id, user.principal.id, { ifVersion: req.body.baseVersion }).catch((e) => {
+        if (e instanceof CuratorError) throw new AuthError("conflict", e.message);
+        throw e;
+      });
+      await auth.audit.writeNow({ principalId: a.principal.id, action: "page.verify", resource: r.id, ...meta(req), data: { version: r.version } });
+      return r;
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/api/pages/:id/backlinks", async (req) => {
     const { p } = reader(req);

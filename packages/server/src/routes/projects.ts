@@ -11,7 +11,7 @@
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { Access, AuthError, type AuthService } from "@cb/auth";
-import { PageStore, withReader, type VaultStore } from "@cb/brain";
+import { extractCitations, PageStore, withReader, type VaultStore } from "@cb/brain";
 import type { Sql } from "@cb/db";
 import { SourceError, type IngestService } from "@cb/ingest";
 import { meta, requireAuth } from "../http.ts";
@@ -201,7 +201,14 @@ export function projectRoutes(app: FastifyInstance, sql: Sql, auth: AuthService,
         author: a.principal.id,
       });
       await auth.audit.writeNow({ principalId: a.principal.id, action: "project.doc.write", resource: r.page.id, ...meta(req), data: { vault: v.id, section, version: r.page.version, tokens: r.page.tokens } });
-      return { section, id: r.page.id, version: r.page.version, changed: r.changed };
+      // what the text links or cites and the vault does not have: the agent can fix it now
+      const brokenLinks = (await sql<{ t: string }[]>`select distinct target_raw as t from links where src_page = ${r.page.id} and dst_page is null order by 1 limit 50`).map((x) => x.t);
+      const cited = [...new Set(extractCitations(body).map((c) => c.source))].slice(0, 200);
+      const known = cited.length
+        ? new Set((await sql<{ id: string }[]>`select id from sources where vault_id = ${v.id} and id = any(${cited}) union select id from pages where vault_id = ${v.id} and id = any(${cited})`).map((x) => x.id))
+        : new Set<string>();
+      const unknownCitations = cited.filter((c) => !known.has(c));
+      return { section, id: r.page.id, version: r.page.version, changed: r.changed, ...(brokenLinks.length ? { brokenLinks } : {}), ...(unknownCitations.length ? { unknownCitations } : {}) };
     },
   );
 

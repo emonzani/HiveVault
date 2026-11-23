@@ -446,7 +446,7 @@ export function adminRoutes(app: FastifyInstance, auth: AuthService, vaults: Vau
     },
   );
 
-  app.patch<{ Params: { id: string }; Body: { name?: string; owner?: string | null; schemaMd?: string; defaultClassification?: number; vectorIndex?: VectorIndexKind } }>(
+  app.patch<{ Params: { id: string }; Body: { name?: string; owner?: string | null; schemaMd?: string; defaultClassification?: number; vectorIndex?: VectorIndexKind; reviewDays?: Record<string, number> } }>(
     "/api/admin/vaults/:id",
     {
       schema: {
@@ -457,7 +457,10 @@ export function adminRoutes(app: FastifyInstance, auth: AuthService, vaults: Vau
             name: str(120),
             owner: { anyOf: [{ type: "string", pattern: "^(user|edge|team|project):[A-Za-z0-9_-]+$" }, { type: "null" }] },
             schemaMd: { type: "string", maxLength: 100000 },
-            defaultClassification: { type: "integer", minimum: 0, maximum: PERSONAL }, vectorIndex: { enum: ["binary", "full", "none"] } },
+            defaultClassification: { type: "integer", minimum: 0, maximum: PERSONAL }, vectorIndex: { enum: ["binary", "full", "none"] },
+            // days before a page of a kind ("entity") or type ("entity/company") is to review again; 0 or absent: never
+            reviewDays: { type: "object", maxProperties: 30, propertyNames: { pattern: "^[a-z]+(/[a-z-]+)?$", maxLength: 60 }, additionalProperties: { type: "integer", minimum: 0, maximum: 36500 } },
+          },
           additionalProperties: false,
         },
       },
@@ -466,7 +469,7 @@ export function adminRoutes(app: FastifyInstance, auth: AuthService, vaults: Vau
       requireAction(req, "admin.vaults");
       const v = await vaults.get(req.params.id);
       if (!v) throw new AuthError("not_found", "Vault non trovato.");
-      const { vectorIndex, ...rest } = req.body;
+      const { vectorIndex, reviewDays, ...rest } = req.body;
       if ("owner" in rest) {
         rest.owner = await resolveOwner(rest.owner ?? null);
         // personal content belongs to its owner: it never moves to another one
@@ -489,6 +492,10 @@ export function adminRoutes(app: FastifyInstance, auth: AuthService, vaults: Vau
           where id = ${v.id}`;
       }
       if (vectorIndex && vectorIndex !== v.vectorIndex) await vaults.setVectorIndex(v.id, vectorIndex);
+      if (reviewDays) {
+        const days = Object.fromEntries(Object.entries(reviewDays).filter(([, n]) => n > 0));
+        await auth.sql`update vaults set review_days = ${auth.sql.json(days)}, updated_at = now() where id = ${v.id}`;
+      }
       await audit(req, "admin.vault.update", v.id, { changes: req.body });
       return vaults.get(v.id);
     },

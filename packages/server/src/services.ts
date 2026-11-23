@@ -131,6 +131,10 @@ export async function createServices(cfg: ServerConfig, o: { models?: boolean; w
     window: cfg.dream.window,
     budget: { minutes: cfg.dream.minutes, tokens: cfg.dream.tokens },
     compilePerNight: cfg.dream.compilePerNight,
+    // A6: links downloaded again through the egress guard, one user-requested address at a time
+    refreshLink: (id) => ingest.refresh(id),
+    dropReplaced: (vaultId) => ingest.dropReplaced(vaultId),
+    linkRefreshDays: cfg.dream.linkRefreshDays,
     live: () => settings.get("dream"),
   });
   const dreamScheduler = defineDreamScheduler({ sql: workerSql, dream: dreamTask, window: cfg.dream.window, liveWindow: () => settings.get("dream").window, retention: () => ({ auditDays: cfg.dream.auditDays, taskDays: cfg.dream.taskDays, readDays: settings.get("privacy").readRetentionDays }) });

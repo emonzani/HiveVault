@@ -1,5 +1,5 @@
 /**
- * The 9 tools of the MCP server (plan §7.1), independent of the protocol: each one takes the
+ * The 11 tools of the MCP server (plan §7.1), independent of the protocol: each one takes the
  * caller's context and returns compact Markdown for the cloud agent. The MCP server, the tests and the
  * retrieval eval call the same functions.
  *
@@ -14,14 +14,18 @@ import type { AuditLog } from "@cb/auth";
 import {
   backlinks,
   extractCitations,
+  extractWikilinks,
   neighbors,
   normalizeTitle,
   PageStore,
   readPage,
+  reliabilityLine,
+  reliabilityOf,
   sections,
   slugify,
   withReader,
   type Principal,
+  type Reliability,
   type SearchEngine,
   type SearchHit,
 } from "@cb/brain";
@@ -168,11 +172,12 @@ export async function brainSearchRaw(ctx: ToolContext, a: SearchArgs) {
 /** Documents uploaded in the last days are "recent" in the search results (M15). */
 const RECENT_DAYS = 7;
 
-function hitLine(h: SearchHit, i: number, recent: Set<string>): string {
+function hitLine(h: SearchHit, i: number, recent: Set<string>, rel: Map<string, Reliability>): string {
   const kind = h.kind === "page" ? h.type : "documento";
+  const r = rel.get(h.id);
   // M15: a document not compiled yet may say what no page says yet
   const pending = h.kind === "source" && h.level !== "I3" ? (recent.has(h.id) ? " · documento recente, non ancora compilato" : " · non ancora compilato") : "";
-  const head = `${i + 1}. [${h.id}] **${h.title}** — ${kind} · ${LEVEL[h.level === "I3" ? 3 : h.level === "I2" ? 2 : 1]} · ${tok(h.tokens)}${pending}`;
+  const head = `${i + 1}. [${h.id}] **${h.title}** — ${kind} · ${LEVEL[h.level === "I3" ? 3 : h.level === "I2" ? 2 : 1]} · ${tok(h.tokens)}${pending}${r ? ` · affidabilità ${r.level}${r.reviewDue ? " (da ricontrollare)" : r.conflicts ? " (conflitti)" : ""}` : ""}`;
   const tldr = h.tldr ? `\n   ${h.tldr.replace(/\s+/g, " ").slice(0, 240)}` : "";
   const snippets = h.chunks
     .slice(0, 2)
@@ -194,6 +199,8 @@ export async function brainSearch(ctx: ToolContext, a: SearchArgs): Promise<stri
         ).map((x) => x.id)
       : [],
   );
+  const pageIds = r.hits.filter((h) => h.kind === "page").map((h) => h.id);
+  const rel = pageIds.length ? await withReader(ctx.sql, readerOf(ctx), (tx) => reliabilityOf(tx, pageIds)) : new Map<string, Reliability>();
   return [
     `${r.hits.length} risultati per «${a.query}» (${tok(r.totalTokens)} in tutto${notes.length ? `; ${notes.join("; ")}` : ""}).`,
     `Leggi una pagina con brain_read(id); un documento non compilato con brain_read(id) o brain_source(citazione).`,
@@ -201,7 +208,7 @@ export async function brainSearch(ctx: ToolContext, a: SearchArgs): Promise<stri
       ? [`${pending.length} ${pending.length === 1 ? "risultato è un documento" : "risultati sono documenti"} non ancora compilati: le pagine potrebbero non dire ancora quello che dicono. Leggili con brain_read prima di rispondere che un'informazione manca.`]
       : []),
     ``,
-    ...r.hits.map((h, i) => hitLine(h, i, recent)),
+    ...r.hits.map((h, i) => hitLine(h, i, recent, rel)),
   ].join("\n");
 }
 
@@ -224,9 +231,12 @@ export async function brainRead(ctx: ToolContext, a: ReadArgs): Promise<string> 
   if (!r) throw new ToolError(`Pagina «${a.id}» non trovata o non accessibile. Cerca con brain_search.`);
   audit(ctx, "page.read", r.id, { classification: r.classification, tokens: r.contentTokens });
   const omitted = r.omitted.length ? `\n\n---\nSezioni non incluse: ${r.omitted.map((s) => `${s.id} (${tok(s.tokens)})`).join(", ")}. Leggile con sections=[…].` : "";
-  const newer = r.type.split("/")[0] === "source" ? [] : await newerSources(ctx, p, r.id);
+  const source = r.type.split("/")[0] === "source";
+  const newer = source ? [] : await newerSources(ctx, p, r.id);
+  const rel = source ? undefined : (await withReader(ctx.sql, p, (tx) => reliabilityOf(tx, [r.id]))).get(r.id);
   return [
     `[${r.id}] ${r.type} · ${CLASS[r.classification]} · versione ${r.version} · aggiornata ${new Date(r.updatedAt).toISOString().slice(0, 10)} · pagina intera ${tok(r.tokens)} · qui ${tok(r.contentTokens)} · ${r.backlinks} backlink`,
+    ...(rel ? [`Affidabilità: ${reliabilityLine(rel).replace(/^affidabilità /, "")}.${rel.reviewDue ? " Una persona deve ricontrollare la pagina: verifica i punti che usi con brain_source." : ""}`] : []),
     `Cita come ^[${r.id}#sezione].`,
     ...(newer.length
       ? [
@@ -494,36 +504,50 @@ export interface AskResult {
   context: string[];
 }
 
-export async function brainAskRaw(ctx: ToolContext, a: { question: string; vaults?: string[]; max_tokens?: number }): Promise<AskResult> {
-  if (!ctx.dispatcher) throw new ToolError("Il modello locale non è configurato su questo server.");
-  const r = await brainSearchRaw(ctx, { query: a.question, ...(a.vaults ? { vaults: a.vaults } : {}), limit: 6, max_tokens: 4000 });
-  if (!r.hits.length) return { answer: "La memoria non contiene informazioni su questa domanda.", citations: [], unknown: [], tokens: 0, context: [] };
+/**
+ * The pages and document parts found by the queries, read within the budget, as tagged blocks
+ * for the local model. Hits found by more than one query are read once.
+ */
+async function gatherContext(ctx: ToolContext, queries: string[], vaults: string[] | undefined, budget: number, focus: string, tag: Record<string, unknown>): Promise<{ blocks: string[]; ids: Set<string> }> {
   const p = readerOf(ctx);
-  const budget = Math.min(a.max_tokens ?? 3000, 6000);
   const blocks: string[] = [];
   const ids = new Set<string>();
+  const seen = new Set<string>();
   let used = 0;
-  for (const h of r.hits) {
-    if (used > budget) break;
-    if (h.kind === "page") {
-      const page = await readPage(ctx.sql, p, h.id, { maxTokens: Math.min(1200, budget - used), query: a.question });
-      if (!page) continue;
-      audit(ctx, "page.read", page.id, { classification: page.classification, tokens: page.contentTokens, ask: true });
-      blocks.push(`<pagina id="${page.id}">\n${page.content}\n</pagina>`);
-      ids.add(page.id);
-      used += page.contentTokens;
-    } else {
-      for (const c of h.chunks.slice(0, 2)) {
-        const cite = c.id.replace(/:(\d+)$/, "#c$1");
-        const [row] = await withReader(ctx.sql, p, (tx) => tx<{ text: string; tokens: number }[]>`select text, tokens from chunks where vault_id = any(${p.vaults}) and id = ${c.id}`);
-        if (!row) continue;
-        blocks.push(`<fonte id="${cite}" documento="${h.title}">\n${row.text}\n</fonte>`);
-        ids.add(cite);
-        ids.add(h.id);
-        used += row.tokens;
+  for (const q of queries) {
+    const r = await brainSearchRaw(ctx, { query: q, ...(vaults ? { vaults } : {}), limit: 6, max_tokens: 4000 });
+    for (const h of r.hits) {
+      if (used > budget) break;
+      if (seen.has(h.id)) continue;
+      seen.add(h.id);
+      if (h.kind === "page") {
+        const page = await readPage(ctx.sql, p, h.id, { maxTokens: Math.min(1200, budget - used), query: focus });
+        if (!page) continue;
+        audit(ctx, "page.read", page.id, { classification: page.classification, tokens: page.contentTokens, ...tag });
+        blocks.push(`<pagina id="${page.id}">\n${page.content}\n</pagina>`);
+        ids.add(page.id);
+        used += page.contentTokens;
+      } else {
+        for (const c of h.chunks.slice(0, 2)) {
+          const cite = c.id.replace(/:(\d+)$/, "#c$1");
+          const [row] = await withReader(ctx.sql, p, (tx) => tx<{ text: string; tokens: number }[]>`select text, tokens from chunks where vault_id = any(${p.vaults}) and id = ${c.id}`);
+          if (!row) continue;
+          blocks.push(`<fonte id="${cite}" documento="${h.title}">\n${row.text}\n</fonte>`);
+          ids.add(cite);
+          ids.add(h.id);
+          used += row.tokens;
+        }
       }
     }
   }
+  return { blocks, ids };
+}
+
+export async function brainAskRaw(ctx: ToolContext, a: { question: string; vaults?: string[]; max_tokens?: number }): Promise<AskResult> {
+  if (!ctx.dispatcher) throw new ToolError("Il modello locale non è configurato su questo server.");
+  const budget = Math.min(a.max_tokens ?? 3000, 6000);
+  const { blocks, ids } = await gatherContext(ctx, [a.question], a.vaults, budget, a.question, { ask: true });
+  if (!blocks.length) return { answer: "La memoria non contiene informazioni su questa domanda.", citations: [], unknown: [], tokens: 0, context: [] };
   const res = await ctx.dispatcher.chat(
     {
       messages: [
@@ -558,6 +582,110 @@ export async function brainAsk(ctx: ToolContext, a: { question: string; vaults?:
 }
 
 // ---------------------------------------------------------------------------
+// brain_verify (local model): is a statement supported by the memory?
+// ---------------------------------------------------------------------------
+
+export type Verdict = "supportata" | "in parte" | "contraddetta" | "non verificabile";
+const VERDICTS: Verdict[] = ["supportata", "in parte", "contraddetta", "non verificabile"];
+
+export interface VerifyResult {
+  verdict: Verdict;
+  reason: string;
+  /** Citations for and against, among the context read (others are dropped). */
+  support: string[];
+  against: string[];
+  /** Citations of the model that were not in the context. */
+  unknown: string[];
+  context: string[];
+  tokens: number;
+}
+
+/**
+ * The statement without its values: numbers, dates and amounts. The second search finds what the
+ * memory says about the same subject whatever the value, so a different value can come up
+ * (llm-wiki "thesis": look on purpose for the other side).
+ */
+export function subjectQuery(claim: string): string {
+  return claim
+    .replace(/\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}/g, " ")
+    .replace(/[€$£]?\s?\d+(?:[.,]\d+)*\s?(%|€|euro|eur|k|mila|milioni)?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The model answer as a verdict; null when it is not the expected JSON. */
+export function parseVerdict(text: string): { verdict: Verdict; reason: string; support: string[]; against: string[] } | null {
+  const m = /\{[\s\S]*\}/.exec(text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/```(?:json)?/g, ""));
+  if (!m) return null;
+  try {
+    const v = JSON.parse(m[0]) as Record<string, unknown>;
+    const verdict = String(v.verdetto ?? v.verdict ?? "").toLowerCase().trim() as Verdict;
+    if (!VERDICTS.includes(verdict)) return null;
+    const list = (x: unknown) => (Array.isArray(x) ? x.map((s) => String(s).replace(/^\^\[|\]$/g, "").trim()).filter(Boolean) : []);
+    return { verdict, reason: String(v.motivo ?? v.reason ?? "").trim().slice(0, 1000), support: list(v.a_favore), against: list(v.contro) };
+  } catch {
+    return null;
+  }
+}
+
+export async function brainVerifyRaw(ctx: ToolContext, a: { claim: string; vaults?: string[]; max_tokens?: number }): Promise<VerifyResult> {
+  if (!ctx.dispatcher) throw new ToolError("Il modello locale non è configurato su questo server.");
+  const budget = Math.min(a.max_tokens ?? 4000, 8000);
+  const other = subjectQuery(a.claim);
+  const queries = other && other !== a.claim ? [a.claim, other] : [a.claim];
+  const { blocks, ids } = await gatherContext(ctx, queries, a.vaults, budget, a.claim, { verify: true });
+  const empty: VerifyResult = { verdict: "non verificabile", reason: "La memoria non contiene informazioni su questo argomento.", support: [], against: [], unknown: [], context: [], tokens: 0 };
+  if (!blocks.length) return empty;
+  const res = await ctx.dispatcher.chat(
+    {
+      messages: [
+        {
+          role: "system",
+          content:
+            "Verifichi un'affermazione solo con le pagine e le fonti tra i tag. Cerca prima le prove contrarie, poi quelle a favore. " +
+            "Verdetti: «supportata» (le fonti la confermano tutta), «in parte» (ne confermano solo una parte o con valori diversi in parte), " +
+            "«contraddetta» (le fonti dicono altro, per esempio un valore o una data diversi), «non verificabile» (le fonti non ne parlano). " +
+            "Se fonti diverse non sono d'accordo, vale la più recente e il verdetto lo dice. " +
+            'Rispondi solo con JSON: {"verdetto": "...", "motivo": "una o due frasi in italiano", "a_favore": ["id"], "contro": ["id"]}, con gli id dei tag.',
+        },
+        { role: "user", content: `${blocks.join("\n\n")}\n\nAffermazione: ${a.claim}` },
+      ],
+      maxTokens: 600,
+      temperature: 0,
+      thinking: false,
+    },
+    { priority: 0 },
+  );
+  const tokens = res.usage.promptTokens + res.usage.completionTokens;
+  const v = parseVerdict(res.content);
+  if (!v) return { ...empty, reason: "Il modello non ha dato un verdetto leggibile: verifica a mano con brain_search e brain_read.", context: [...ids], tokens };
+  const known = (c: string) => ids.has(c) || ids.has(c.split("#")[0]!);
+  const support = [...new Set(v.support.filter(known))];
+  const against = [...new Set(v.against.filter(known))];
+  const unknown = [...new Set([...v.support, ...v.against].filter((c) => !known(c)))];
+  // a verdict without evidence in the context is not a verdict
+  const verdict: Verdict =
+    (v.verdict === "supportata" && !support.length) || (v.verdict === "contraddetta" && !against.length) || (v.verdict === "in parte" && !support.length && !against.length) ? "non verificabile" : v.verdict;
+  return { verdict, reason: v.reason, support, against, unknown, context: [...ids], tokens };
+}
+
+export async function brainVerify(ctx: ToolContext, a: { claim: string; vaults?: string[]; max_tokens?: number }): Promise<string> {
+  const r = await brainVerifyRaw(ctx, a);
+  const cites = (xs: string[]) => (xs.length ? xs.map((x) => `^[${x}]`).join(" ") : "nessuna");
+  return [
+    `Verdetto: **${r.verdict}**`,
+    ``,
+    r.reason,
+    ``,
+    `- A favore: ${cites(r.support)}`,
+    `- Contro: ${cites(r.against)}`,
+    ``,
+    `---`,
+    `Verifica del modello locale di HiveVault su ${r.context.length} fonti, cercate anche senza i valori dell'affermazione per trovare quelle contrarie.${r.unknown.length ? ` Citazioni non verificabili scartate: ${r.unknown.join(", ")}.` : ""} Controlla le citazioni con brain_source prima di usare il verdetto.`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // brain_capture and brain_propose_edit (writes)
 // ---------------------------------------------------------------------------
 
@@ -573,6 +701,41 @@ async function writableVault(ctx: ToolContext, ref?: string): Promise<{ id: stri
   if (cells.length === 1) return cells[0]!;
   if (rows.length === 1) return rows[0]!;
   throw new ToolError(`Indica il vault con vault=… Scrivibili: ${rows.map((x) => x.slug).join(", ") || "nessuno"}.`);
+}
+
+/**
+ * Links and citations of a text the agent writes that lead nowhere (OpenKnowledge: a write
+ * answers with its broken links): `[[names]]` no readable page has, `^[ids]` of no readable
+ * document or page. Checked at once, not at the next nightly cycle.
+ */
+export async function checkRefs(ctx: ToolContext, text: string, vaults?: string[]): Promise<{ links: string[]; citations: string[] }> {
+  const p = readerOf(ctx, vaults);
+  const names = [...new Set(extractWikilinks(text).map((l) => l.target.trim()).filter(Boolean))].slice(0, 50);
+  const refs = [...new Set(extractCitations(text).map((c) => c.source))].slice(0, 100);
+  if (!p.vaults.length || (!names.length && !refs.length)) return { links: [], citations: [] };
+  return withReader(ctx.sql, p, async (tx) => {
+    const links: string[] = [];
+    for (const n of names) if (!(await PageStore.resolve(tx, p.vaults, n)).length) links.push(n);
+    const known = refs.length
+      ? new Set(
+          (
+            await tx<{ id: string }[]>`
+              select id from sources where vault_id = any(${p.vaults}) and id = any(${refs})
+              union select id from pages where vault_id = any(${p.vaults}) and id = any(${refs})`
+          ).map((r) => r.id),
+        )
+      : new Set<string>();
+    return { links, citations: refs.filter((r) => !known.has(r)) };
+  });
+}
+
+/** The answer line about the broken references, or "". */
+function refsNote(r: { links: string[]; citations: string[] }): string {
+  const parts = [
+    r.links.length ? `link a pagine che non esistono: ${r.links.map((l) => `[[${l}]]`).join(", ")}` : "",
+    r.citations.length ? `citazioni a documenti o pagine che non esistono o non sono accessibili: ${r.citations.map((c) => `^[${c}]`).join(", ")}` : "",
+  ].filter(Boolean);
+  return parts.length ? `\nAttenzione, ${parts.join("; ")}. Correggi con brain_search e salva di nuovo, oppure lascia: il ciclo notturno li elenca nella manutenzione del vault.` : "";
 }
 
 export async function brainCapture(
@@ -612,7 +775,8 @@ export async function brainCapture(
     author: ctx.account.id,
   });
   await ctx.audit?.writeNow({ principalId: ctx.account.id, action: "mcp.capture", resource: r.page.id, ...ctx.meta, data: { vault: v.id, tokens: r.page.tokens } });
-  return `Nota salvata: [${r.page.id}] «${finalTitle}» nel vault ${v.name} (\`${v.slug}\`), cartella inbox. Le persone la vedono nell'interfaccia; il ciclo notturno la collega alle altre pagine.`;
+  const refs = refsNote(await checkRefs(ctx, body));
+  return `Nota salvata: [${r.page.id}] «${finalTitle}» nel vault ${v.name} (\`${v.slug}\`), cartella inbox. Le persone la vedono nell'interfaccia; il ciclo notturno la collega alle altre pagine.${refs}`;
 }
 
 /**
@@ -638,7 +802,7 @@ async function captureAsSource(
   // the same text as a document this account may not read: nothing about it
   if (!r.source) return `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`). Nessun nuovo invio.`;
   return r.created
-    ? `Nota inviata all'ingestion: documento [${r.source.id}] «${r.source.name}» nel vault ${v.name} (\`${v.slug}\`). HiveVault la indicizza e la compila in pagine con citazioni; il ciclo notturno la collega al resto.`
+    ? `Nota inviata all'ingestion: documento [${r.source.id}] «${r.source.name}» nel vault ${v.name} (\`${v.slug}\`). HiveVault la indicizza e la compila in pagine con citazioni; il ciclo notturno la collega al resto.${refsNote(await checkRefs(ctx, body))}`
     : `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`): documento [${r.source.id}] «${r.source.name}». Nessun nuovo invio.`;
 }
 

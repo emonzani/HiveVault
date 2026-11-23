@@ -7,3 +7,4 @@ export * from "./import.ts";
 export * from "./idle.ts";
 export * from "./names.ts";
 export * from "./extract.ts";
+export * from "./retract.ts";

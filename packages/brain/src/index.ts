@@ -10,3 +10,4 @@ export * from "./read.ts";
 export { exportVault, importVault, obsidianFileName, type ExportResult, type ImportResult } from "./obsidian.ts";
 export * from "./browse.ts";
 export * from "./checkpoints.ts";
+export * from "./reliability.ts";

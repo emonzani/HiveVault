@@ -108,6 +108,8 @@ Per uno spazio, la sezione **Celle che alimentano lo spazio** sceglie le celle. 
 
 Nella scheda del vault puoi cambiare anche il **proprietario** (chi vede la cella come propria) e **SCHEMA.md**, le regole che il modello segue quando compila le pagine del vault. L'identificativo non si cambia: è negli indirizzi `brain://` e nei collegamenti.
 
+**Ricontrollo delle pagine** dà i giorni dopo i quali una pagina di entità, concetto, decisione o sintesi va ricontrollata. Il conteggio parte dall'ultima conferma, dall'ultimo documento citato o dalla creazione della pagina. Vuoto = mai. Il ciclo notturno mette le pagine scadute nella coda dei curatori (tipo «Da ricontrollare») e nella pagina «Manutenzione del vault». Una pagina può avere la sua data: `review_after: AAAA-MM-GG` oppure `review_every: <giorni>` nel frontmatter.
+
 **Esporta zip** scarica le pagine in Markdown. **Importa zip** le ripristina. Prima dell'import il server salva un punto di ripristino. Se l'import riscrive più di un quinto delle pagine del vault, la console chiede una seconda conferma.
 
 **Punti di ripristino**: una copia delle pagine del vault in un momento.
@@ -151,6 +153,10 @@ Gli amministratori vedono tutti i vault. Ogni persona vede sempre la propria cel
 | I3 | Pagina compilata dal modello |
 
 **Riprova** legge di nuovo il documento. **Compila** crea subito la pagina. **Elimina** cancella il documento, i file che contiene (zip, allegati) e l'originale cifrato. Le pagine compilate restano.
+
+Un documento citato da altre pagine non si elimina. Nella inbox puoi **ritirarlo** (`POST /api/sources/<id>/retract`): le righe che cita solo lui escono dalle pagine del vault, le pagine compilate senza altre fonti vanno via, le versioni precedenti che lo citano vanno via, poi il documento va via. Le pagine dell'alveare si ricostruiscono nella notte. I punti di ripristino non cambiano: se il testo deve sparire del tutto (diritto alla cancellazione), elimina anche i punti salvati prima del ritiro. Un documento citato da pagine di altri vault non si ritira.
+
+I documenti aggiunti da un link si scaricano di nuovo nel ciclo notturno, dopo `LINK_REFRESH_DAYS` giorni (predefinito 7; 0 = mai), al massimo 20 per vault e notte. Un contenuto nuovo diventa un nuovo documento con lo stesso indirizzo; quello vecchio va via quando il nuovo è compilato, se nessuna pagina lo cita.
 
 **Modifica** cambia il titolo e la classificazione di un documento:
 

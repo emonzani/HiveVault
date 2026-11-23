@@ -36,6 +36,7 @@ Write only when the user asks, or when the mod starts a documentation update aft
 2. Explore the code. Write the **full** section, not a diff: real names of files, types, functions, fields, commands and values, exact numbers, examples from the repository. Another developer must be able to work from the section without the code.
 3. `project_doc_write(section, markdown, summary, baseVersion)`. `summary` is one sentence that the next session reads first. The section records the commit `HEAD`.
 4. A conflict means that someone changed the section after your read. Read it again and write on top of the new version. Never overwrite the work of a person.
+5. The answer of a write can list `brokenLinks` (`[[names]]` no page of the vault has) and `unknownCitations` (`^[ids]` of no document or page of the vault). Correct them and write again.
 
 Rules:
 

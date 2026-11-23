@@ -142,6 +142,32 @@
     ui.toast(t("Wikilink copiato."), "ok");
   }
 
+  let verifying = $state(false);
+  /** "È corretta": the page counts as checked from today (its review period starts again). */
+  async function verify() {
+    if (!page) return;
+    verifying = true;
+    try {
+      await api.post(`/api/pages/${encodeURIComponent(page.id)}/verify`, { baseVersion: page.version });
+      pageEvents.notify(page.id);
+      ui.toast(t("Pagina confermata: conta come controllata da oggi."), "ok");
+    } catch (e) {
+      ui.toast((e as Error).message, "error");
+    } finally {
+      verifying = false;
+    }
+  }
+  const LEVEL: Record<string, string> = { alta: t("Affidabilità alta"), media: t("Affidabilità media"), bassa: t("Affidabilità bassa") };
+  const relTitle = (r: NonNullable<FullPage["reliability"]>) =>
+    [
+      t("{n} fonti citate", { n: r.sources }),
+      r.conflicts ? t("{n} conflitti aperti", { n: r.conflicts }) : "",
+      r.verified ? t("confermata da {by} il {at}", { by: r.verified.by, at: r.verified.at }) : "",
+      r.reviewAfter ? (r.reviewDue ? t("da ricontrollare dal {at}", { at: r.reviewAfter }) : t("ricontrollo previsto il {at}", { at: r.reviewAfter })) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
   const cites = $derived(page && rendered ? [...rendered.citeOrder.entries()].map(([ref, n]) => ({ n, ref, c: page!.citations.find((x) => x.ref === ref) })) : []);
   const vaultName = $derived(page ? session.vaultName(page.vaultId) : "");
 </script>
@@ -219,6 +245,14 @@
             <span class="dim tabular" title={t("Costo di lettura per l'agente cloud")}>{t("{tokens} token", { tokens: nf.format(page.tokens) })}</span>
             <span class="dim" title={t("Versione {version}", { version: page.version })}>{t("aggiornata {updatedAt} · v{version}", { updatedAt: when(page.updatedAt), version: page.version })}</span>
             {#if page.confidence !== null}<span class="dim" title={t("Fiducia della compilazione")}>{t("fiducia {round}%", { round: Math.round(page.confidence * 100) })}</span>{/if}
+            {#if page.reliability}
+              <span class="rel" class:low={page.reliability.level === "bassa"} title={relTitle(page.reliability)}>
+                {LEVEL[page.reliability.level]}{#if page.reliability.reviewDue} · {t("da ricontrollare")}{:else if page.reliability.verified} · {t("confermata")}{/if}
+              </span>
+              {#if page.canWrite && !page.generated}
+                <button class="link-btn" disabled={verifying} onclick={verify} title={t("Conferma che la pagina è corretta: conta come controllata da oggi")}>{t("È corretta")}</button>
+              {/if}
+            {/if}
           </div>
           {#if page.generated}
             <p class="notice small">
@@ -374,6 +408,26 @@
   }
   .facts > :global(:first-child) {
     margin-right: 0.25rem;
+  }
+  .rel {
+    font-weight: 600;
+    color: var(--text-main);
+  }
+  .rel.low {
+    color: var(--alert-ink);
+  }
+  .link-btn {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-blue);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .link-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .agent {
     display: inline-flex;

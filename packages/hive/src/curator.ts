@@ -1,16 +1,51 @@
 /**
  * Curator queue (plan §3.2, §5 step 5 and 7): conflicts between cells, duplicate candidates,
- * lint findings and low-confidence statements. A decision on a conflict is applied to the
+ * lint findings, low-confidence statements and pages to review. A decision on a conflict is applied to the
  * hive page at once and at every later promotion, until the values in the cells change.
  */
 import type { Sql } from "@cb/db";
-import { PageStore } from "@cb/brain";
+import { PageStore, PageVersionError } from "@cb/brain";
 import { promoteSpace, type Resolution } from "./promote.ts";
+
+/**
+ * A person confirms a page (A4): `verified_by` (display name) and `verified_at` (today) in the
+ * frontmatter. The review period of the page starts again; the open "review" items of the page
+ * are resolved. Generated pages (hive, `_inbox/`) are rebuilt and cannot be confirmed.
+ */
+export async function verifyPage(sql: Sql, pages: PageStore, pageId: string, by: string, o: { ifVersion?: number } = {}): Promise<{ id: string; version: number; verifiedAt: string }> {
+  const [who] = await sql<{ name: string }[]>`select display_name as name from principals where id = ${by}`;
+  const at = new Date().toISOString().slice(0, 10);
+  for (let attempt = 0; ; attempt++) {
+    const page = await PageStore.get(sql, pageId);
+    if (!page) throw new CuratorError("La pagina non esiste più.");
+    if (typeof page.frontmatter.hive_subject === "string" || page.path.startsWith("_inbox/") || page.type.split("/")[0] === "source") {
+      throw new CuratorError("Questa pagina è generata e non si conferma: conferma le pagine da cui deriva.");
+    }
+    if (o.ifVersion !== undefined && page.version !== o.ifVersion) throw new CuratorError(`La pagina è cambiata (versione ${page.version}): rileggila prima di confermarla.`);
+    try {
+      const r = await pages.upsert({
+        vaultId: page.vaultId,
+        id: page.id,
+        path: page.path,
+        frontmatter: { ...page.frontmatter, verified_by: who?.name ?? by, verified_at: at },
+        body: page.body,
+        author: by,
+        ifVersion: page.version,
+      });
+      await sql`
+        update curator_items set status = 'resolved', resolution = ${sql.json({ verified: true, at } as never)}, resolved_by = ${by}, resolved_at = now()
+        where kind = 'review' and status = 'open' and page_id = ${page.id}`;
+      return { id: page.id, version: r.page.version, verifiedAt: at };
+    } catch (e) {
+      if (!(e instanceof PageVersionError) || attempt >= 2 || o.ifVersion !== undefined) throw e;
+    }
+  }
+}
 
 export interface CuratorItem {
   id: string;
   spaceId: string;
-  kind: "conflict" | "duplicate" | "lint" | "low_confidence" | "proposal" | "mass_change" | "rectification";
+  kind: "conflict" | "duplicate" | "lint" | "low_confidence" | "proposal" | "mass_change" | "rectification" | "review";
   subject: string;
   predicate: string | null;
   pageId: string | null;
@@ -74,6 +109,8 @@ export class Curator {
       update curator_items set status = 'resolved', resolution = ${this.sql.json(decision as never)}, resolved_by = ${by}, resolved_at = now()
       where id = ${id}`;
     if (item.kind === "conflict") await promoteSpace(this.sql, this.pages, item.spaceId, { subjects: [item.subject] });
+    // a page to review, confirmed: it counts as checked from today
+    if (item.kind === "review" && typeof item.data.pageId === "string") await verifyPage(this.sql, this.pages, item.data.pageId, by).catch((e) => (e instanceof CuratorError ? null : Promise.reject(e)));
     if (item.kind === "mass_change" && item.data.action === "remove") {
       await promoteSpace(this.sql, this.pages, item.spaceId, { cleanup: true, confirmedRemovals: (item.data.subjects as string[] | undefined) ?? [] });
     }

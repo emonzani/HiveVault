@@ -361,7 +361,7 @@ async function buildPage(
 async function upsertItem(
   sql: Sql,
   spaceId: string,
-  kind: "conflict" | "low_confidence" | "duplicate" | "lint" | "proposal" | "mass_change" | "rectification",
+  kind: "conflict" | "low_confidence" | "duplicate" | "lint" | "proposal" | "mass_change" | "rectification" | "review",
   fingerprint: string,
   subject: string,
   predicate: string | null,

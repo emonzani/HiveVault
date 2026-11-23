@@ -28,7 +28,7 @@ import {
 import type { Sql } from "@cb/db";
 import { upsertCuratorItem } from "@cb/hive";
 import type { ModelDispatcher } from "@cb/models";
-import { estimateTokens } from "@cb/shared";
+import { estimateTokens, ulid } from "@cb/shared";
 import { createHash } from "node:crypto";
 
 /** Hits re-scored by the reranker in brain_search (MCP_RERANK_TOP). */
@@ -54,9 +54,19 @@ export interface ToolContext {
   ingest?: SourceSink;
 }
 
-/** What brain_capture needs of the ingestion service (`IngestService.upload`). */
+/**
+ * What brain_capture needs of the ingestion service (`IngestService.upload`). `source: null`: the
+ * same text as a source the reader may not read.
+ */
 export interface SourceSink {
-  upload(vaultId: string, data: Buffer, name: string, by: string | null, o?: { classification?: number; compile?: boolean }): Promise<{ source: { id: string; name: string }; created: boolean; taskId: string | null }>;
+  upload(
+    vaultId: string,
+    data: Buffer,
+    name: string,
+    by: string | null,
+    reader: Principal,
+    o?: { classification?: number; compile?: boolean },
+  ): Promise<{ source: { id: string; name: string } | null; created: boolean; taskId: string | null }>;
 }
 
 export class ToolError extends Error {}
@@ -575,13 +585,21 @@ export async function brainCapture(
   if (!title || !a.content.trim()) throw new ToolError("Servono titolo e contenuto.");
   // a project vault sends the note to ingestion by default: the compiler turns it into pages
   if (a.compile ?? !!v.owner?.startsWith("project:")) return captureAsSource(ctx, v, title, a);
-  const day = new Date().toISOString().slice(0, 10);
-  const exists = (await PageStore.resolve(ctx.sql, [v.id], title)).length > 0;
-  const finalTitle = exists ? `${title} (${day} ${new Date().toISOString().slice(11, 16)})` : title;
+  // Title and path never depend on pages the key cannot see: a lookup of the title as the owner
+  // role told the key that a page of any classification had that name. Every note gets the time
+  // in its title and a random tail in its path; a page that already has the path gets a new
+  // tail, so a note never replaces a page.
+  const now = new Date().toISOString();
+  const day = now.slice(0, 10);
+  const finalTitle = `${title} (${day} ${now.slice(11, 16)})`;
+  let path: string;
+  do {
+    path = `inbox/${day}-${slugify(finalTitle)}-${ulid().slice(-6).toLowerCase()}.md`;
+  } while ((await ctx.sql`select 1 from pages where vault_id = ${v.id} and path = ${path}`).length > 0);
   const body = a.content.trim().startsWith("# ") ? a.content.trim() : `# ${finalTitle}\n\n${a.content.trim()}`;
   const r = await ctx.pages.upsert({
     vaultId: v.id,
-    path: `inbox/${day}-${slugify(finalTitle)}.md`,
+    path,
     frontmatter: {
       title: finalTitle,
       type: "note/capture",
@@ -615,8 +633,10 @@ async function captureAsSource(
   const front = [`title: ${JSON.stringify(title)}`, `tags: [${tags.map((t) => JSON.stringify(t)).join(", ")}]`, `captured_by: ${JSON.stringify(ctx.account.name)}`];
   const text = `---\n${front.join("\n")}\n---\n${body}\n`;
   const classification = a.classification === "pubblico" ? 0 : 1;
-  const r = await ctx.ingest.upload(v.id, Buffer.from(text, "utf8"), `${day}-${slugify(title) || "nota"}.md`, ctx.account.id, { classification, compile: true });
-  await ctx.audit?.writeNow({ principalId: ctx.account.id, action: "mcp.capture", resource: r.source.id, ...ctx.meta, data: { vault: v.id, source: true, created: r.created } });
+  const r = await ctx.ingest.upload(v.id, Buffer.from(text, "utf8"), `${day}-${slugify(title) || "nota"}.md`, ctx.account.id, readerOf(ctx, [v.id]), { classification, compile: true });
+  await ctx.audit?.writeNow({ principalId: ctx.account.id, action: "mcp.capture", resource: r.source?.id ?? null, ...ctx.meta, data: { vault: v.id, source: true, created: r.created } });
+  // the same text as a document this account may not read: nothing about it
+  if (!r.source) return `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`). Nessun nuovo invio.`;
   return r.created
     ? `Nota inviata all'ingestion: documento [${r.source.id}] «${r.source.name}» nel vault ${v.name} (\`${v.slug}\`). HiveVault la indicizza e la compila in pagine con citazioni; il ciclo notturno la collega al resto.`
     : `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`): documento [${r.source.id}] «${r.source.name}». Nessun nuovo invio.`;
@@ -720,6 +740,8 @@ export async function brainProposeEdit(
   if (typeof page.frontmatter.hive_subject === "string" || page.path.startsWith("_inbox/")) {
     throw new ToolError("Questa pagina è scritta dal ciclo notturno: proponi la modifica sulle pagine delle celle da cui deriva.");
   }
+  // the page is found among the readable vaults: the proposal goes only into a writable one
+  await writableVault(ctx, page.vaultId);
   let body: string;
   if (a.markdown) body = a.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
   else if (a.section && a.text !== undefined) {

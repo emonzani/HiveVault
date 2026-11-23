@@ -6,10 +6,14 @@ export type AuthErrorCode =
   | "expired"
   | "invalid_request"
   | "conflict"
-  | "unauthenticated";
+  | "unauthenticated"
+  | "signature_outdated"
+  | "origin_mismatch";
 
 const STATUS: Record<AuthErrorCode, number> = {
   invalid_credentials: 401,
+  signature_outdated: 401,
+  origin_mismatch: 401,
   unauthenticated: 401,
   expired: 401,
   locked: 429,

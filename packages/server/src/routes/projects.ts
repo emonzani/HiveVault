@@ -13,6 +13,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { Access, AuthError, type AuthService } from "@cb/auth";
 import { PageStore, withReader, type VaultStore } from "@cb/brain";
 import type { Sql } from "@cb/db";
+import { SourceError, type IngestService } from "@cb/ingest";
 import { meta, requireAuth } from "../http.ts";
 
 /** The sections of a project vault: path under progetto/, title and what goes in it. */
@@ -28,8 +29,12 @@ export type ProjectSection = keyof typeof PROJECT_SECTIONS;
 const SECTIONS = Object.keys(PROJECT_SECTIONS) as ProjectSection[];
 const SLUG = /^[a-z0-9][a-z0-9-]{1,62}$/;
 const pathOf = (s: ProjectSection) => `progetto/${s}.md`;
+/** A repository file: a relative path, no "..", no drive, no backslash. */
+const FILE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.?(?:\/|$))[^\\:\0]{1,500}$/;
+/** The largest repository file the mod sends (it reads at most 4 MiB). */
+const FILE_MAX_BYTES = 4 * 1024 ** 2;
 
-export function projectRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, vaults: VaultStore): void {
+export function projectRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, vaults: VaultStore, ingest?: IngestService): void {
   const pages = new PageStore(sql);
 
   /** API accounts need the scope "projects"; people need to be administrators. */
@@ -197,6 +202,109 @@ export function projectRoutes(app: FastifyInstance, sql: Sql, auth: AuthService,
       });
       await auth.audit.writeNow({ principalId: a.principal.id, action: "project.doc.write", resource: r.page.id, ...meta(req), data: { vault: v.id, section, version: r.page.version, tokens: r.page.tokens } });
       return { section, id: r.page.id, version: r.page.version, changed: r.changed };
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Repository files (vault-docs.conf of the mod): one source of the vault per file path,
+  // `meta.projectFile` = the path. A new version replaces the old source; a file the
+  // repository no longer lists is deleted. Ingestion compiles them like uploads.
+  // -------------------------------------------------------------------------
+
+  /** The sources of the vault that stand for repository files, by path. */
+  async function fileSources(vaultId: string) {
+    return sql<{ id: string; path: string; status: string; commit: string | null }[]>`
+      select id, meta->>'projectFile' as path, status, meta->>'commit' as commit from sources
+      where vault_id = ${vaultId} and parent_id is null and meta ? 'projectFile' and classification <> 4
+      order by meta->>'projectFile', created_at`;
+  }
+
+  /** Deletes the sources of a path except `keep`; what could not go (busy, cited) is returned. */
+  async function dropFile(vaultId: string, path: string, keep?: string): Promise<{ removed: number; kept: string[] }> {
+    const stale = (await fileSources(vaultId)).filter((s) => s.path === path && s.id !== keep);
+    let removed = 0;
+    const kept: string[] = [];
+    for (const s of stale) {
+      try {
+        await ingest!.remove(s.id);
+        removed++;
+      } catch (e) {
+        if (!(e instanceof SourceError)) throw e;
+        kept.push(e.message);
+      }
+    }
+    return { removed, kept };
+  }
+
+  function needIngest(): IngestService {
+    if (!ingest) throw new AuthError("conflict", "L'ingestion non è attiva su questo server.");
+    return ingest;
+  }
+
+  app.get<{ Params: { slug: string } }>("/api/projects/:slug/files", async (req) => {
+    const { v } = await project(req, req.params.slug, "read");
+    return { files: (await fileSources(v.id)).map((s) => ({ path: s.path, sourceId: s.id, status: s.status, ...(s.commit ? { commit: s.commit } : {}) })) };
+  });
+
+  /**
+   * Writes one repository file (`content` in base64). The same bytes as the current source of
+   * the path change nothing; new bytes become a new source and the old one is deleted.
+   */
+  app.put<{ Params: { slug: string }; Body: { path: string; content: string; commit?: string } }>(
+    "/api/projects/:slug/files",
+    {
+      bodyLimit: Math.ceil(FILE_MAX_BYTES * 1.4) + 4096,
+      schema: {
+        body: {
+          type: "object",
+          required: ["path", "content"],
+          properties: {
+            path: { type: "string", pattern: FILE_PATH.source },
+            content: { type: "string", maxLength: Math.ceil((FILE_MAX_BYTES * 4) / 3) + 4 },
+            commit: { type: "string", pattern: "^[0-9a-f]{7,40}$" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (req) => {
+      const svc = needIngest();
+      const { a, v } = await project(req, req.params.slug, "write");
+      const data = Buffer.from(req.body.content, "base64");
+      if (!data.length) throw new AuthError("invalid_request", "Il file è vuoto.");
+      const name = req.body.path.split("/").pop()!;
+      const r = await svc.upload(v.id, data, name, a.principal.id, Access.toReader(a.ctx, [v.id]), { compile: true });
+      // the same bytes as a source the caller may not read: nothing about it, nothing written
+      if (!r.source) return { path: req.body.path, removed: 0, duplicate: true };
+      const owner = r.source.meta?.projectFile;
+      // the same bytes as another file of the vault (or a person's upload): that source stays its own
+      const mine = r.created || owner === req.body.path;
+      if (r.created) {
+        await sql`update sources set path = ${req.body.path}, meta = meta || ${sql.json({ projectFile: req.body.path, ...(req.body.commit ? { commit: req.body.commit } : {}) })} where id = ${r.source.id}`;
+      } else if (mine && req.body.commit) {
+        // unchanged at a later commit: the next comparison starts from there
+        await sql`update sources set meta = meta || ${sql.json({ commit: req.body.commit })} where id = ${r.source.id}`;
+      }
+      const dropped = await dropFile(v.id, req.body.path, mine ? r.source.id : undefined);
+      if (r.created || dropped.removed) {
+        await auth.audit.writeNow({ principalId: a.principal.id, action: "project.file.write", resource: r.source.id, ...meta(req), data: { vault: v.id, path: req.body.path, created: r.created, removed: dropped.removed } });
+      }
+      return { path: req.body.path, sourceId: r.source.id, created: r.created, removed: dropped.removed, ...(mine ? {} : { duplicateOf: r.source.name }), ...(dropped.kept.length ? { kept: dropped.kept } : {}) };
+    },
+  );
+
+  /** Deletes the sources of a repository file the mod no longer lists. */
+  app.delete<{ Params: { slug: string }; Querystring: { path: string } }>(
+    "/api/projects/:slug/files",
+    { schema: { querystring: { type: "object", required: ["path"], properties: { path: { type: "string", pattern: FILE_PATH.source } } } } },
+    async (req) => {
+      needIngest();
+      const { a, v } = await project(req, req.params.slug, "write");
+      const dropped = await dropFile(v.id, req.query.path);
+      if (dropped.removed) {
+        await auth.audit.writeNow({ principalId: a.principal.id, action: "project.file.delete", resource: v.id, ...meta(req), data: { path: req.query.path, removed: dropped.removed } });
+      }
+      return { path: req.query.path, removed: dropped.removed, ...(dropped.kept.length ? { kept: dropped.kept } : {}) };
     },
   );
 }

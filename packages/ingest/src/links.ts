@@ -9,7 +9,7 @@
  * - Limits: 20 MB, 30 s, http/https only.
  */
 import { lookup } from "node:dns/promises";
-import { isPrivateAddress, type EgressGuard } from "@cb/shared";
+import { isNonPublicAddress, type EgressGuard } from "@cb/shared";
 
 export class LinkError extends Error {
   constructor(message: string) {
@@ -43,7 +43,7 @@ export async function fetchLink(rawUrl: string, guard: EgressGuard | undefined, 
       const addrs = await lookup(host, { all: true }).catch(() => {
         throw new LinkError(`Il nome "${host}" non si risolve.`);
       });
-      if (addrs.some((a) => isPrivateAddress(a.address))) throw new LinkError("Il link punta a un indirizzo della rete interna: non è ammesso.");
+      if (addrs.some((a) => isNonPublicAddress(a.address))) throw new LinkError("Il link punta a un indirizzo della rete interna: non è ammesso.");
     }
     const doFetch = () =>
       fetch(url, { redirect: "manual", signal: deadline, headers: { "user-agent": "HiveVault/0.1 (+link import)", accept: "text/html,application/pdf,*/*;q=0.5" } });

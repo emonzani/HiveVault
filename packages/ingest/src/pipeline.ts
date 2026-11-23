@@ -11,7 +11,7 @@
  * idempotent (content-addressed blobs, chunk replacement, page upsert by path), so a phase
  * that ran twice leaves the same result.
  */
-import type { EmbeddingIndexer } from "@cb/brain";
+import type { EmbeddingIndexer, Principal } from "@cb/brain";
 import type { ParseResult } from "@cb/parsers";
 import { detectLang, UnsupportedFormatError } from "@cb/parsers";
 import { createLogger, metrics } from "@cb/shared";
@@ -67,7 +67,17 @@ export interface PipelineDeps {
    * holds the correspondence of people outside the company.
    */
   email?: () => boolean;
+  /**
+   * The reader of a principal (`Access.toReader` of its context), or null when it no longer
+   * acts. Attachments and archive members are stored as the uploader of their parent: a known
+   * source of the vault changes only when that uploader may read it. Without this function, or
+   * without a recorded uploader, they change no source of another parent.
+   */
+  readerOf?: (principalId: string) => Promise<Principal | null>;
 }
+
+/** A reader that sees no source. */
+const NOBODY: Principal = { id: "", vaults: [], clearance: -1 };
 
 /** Parsers of email files. */
 export const EMAIL_PARSERS = new Set(["eml", "msg", "mbox"]);
@@ -183,20 +193,25 @@ export function defineIngestTask(d: PipelineDeps): IngestTask {
           if (depth >= MAX_DEPTH) {
             await d.store.update(src.id, {}, { warnings: [...r.warnings, "max_depth"] });
           } else {
+            const uploader = (src.createdBy ? await d.readerOf?.(src.createdBy) : null) ?? NOBODY;
             for (const [i, a] of r.attachments.entries()) {
-              const child = await d.store.create(a.data, {
-                vaultId: src.vaultId,
-                name: a.name,
-                origin: "attachment",
-                parentId: src.id,
-                classification: src.classification,
-                priority: src.priority,
-                compile: src.compile,
-                createdBy: src.createdBy,
-              });
+              const child = await d.store.create(
+                a.data,
+                {
+                  vaultId: src.vaultId,
+                  name: a.name,
+                  origin: "attachment",
+                  parentId: src.id,
+                  classification: src.classification,
+                  priority: src.priority,
+                  compile: src.compile,
+                  createdBy: src.createdBy,
+                },
+                uploader,
+              );
               // also when the child exists already: a crash may have hit between create and spawn.
               // spawn is idempotent (stable request id); children of another parent are skipped.
-              if (child.created || child.source.parentId === src.id) {
+              if (child.source && (child.created || child.source.parentId === src.id)) {
                 await c.spawn(task, `child:${i}`, { sourceId: child.source.id }, { priority: Math.min(2, src.priority + 1) });
                 children++;
               }

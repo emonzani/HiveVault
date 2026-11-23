@@ -29,6 +29,7 @@ const app = await buildApp({
     models: services.modelsAdmin,
     settings: services.settings,
     dataDir: cfg.dataDir,
+    blobs: services.blobs,
     metricsToken: cfg.metricsToken,
   },
 });
@@ -38,6 +39,9 @@ log.info("listening", { url: `${cfg.tls ? "https" : "http"}://${cfg.host}:${cfg.
 if ((await services.auth.principals.countAdmins()) === 0) {
   log.warn("no administrator yet: run `npm run cb -- admin create <username>`");
 }
+// blob names of older releases become keyed names (one way). In the background after the
+// server listens: the health check of a deploy does not wait for a large store.
+services.blobs.migrateNames().catch((e: NodeJS.ErrnoException) => log.error("blob name migration stopped", { errorCode: e?.code ?? "unknown" }));
 
 let stopping = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

@@ -78,8 +78,9 @@ export class ModelsAdmin {
 
   private attachRemote(r: RemoteEndpointSetting): void {
     if (this.runtime.dispatcher.snapshot().endpoints.some((e) => e.id === r.id)) return;
-    // an endpoint added by an administrator is configuration, like the model URLs of .env
-    this.egress?.allowUrls([r.url]);
+    // an endpoint added by an administrator: checkUrl found private addresses, and every
+    // connection checks again the address it resolves (DNS rebinding, invariant 1)
+    this.egress?.allowUrls([r.url], { privateOnly: true });
     const ep = new LlamaEndpoint({ id: r.id, kind: r.kind, origin: "remote", url: r.url, slots: r.kind === "embed" ? 4 : r.kind === "rerank" ? 2 : 1, ...(this.apiKey ? { apiKey: this.apiKey } : {}), ...(r.kind === "ocr" && this.cfg ? { ocrPrompt: this.cfg.ocr.prompt, timeoutMs: this.cfg.chat.requestTimeoutMs } : {}) });
     void this.runtime.dispatcher.addEndpoint(ep).catch(() => {});
   }
@@ -118,7 +119,7 @@ export class ModelsAdmin {
   private replaceEnvEndpoint(id: string, url: string): void {
     const ep = this.envEndpoint(id, url);
     if (!ep || !this.runtime.dispatcher.snapshot().endpoints.some((e) => e.id === id)) return;
-    this.egress?.allowUrls([url]);
+    this.egress?.allowUrls([url], { privateOnly: true });
     this.runtime.dispatcher.removeEndpoint(id);
     void this.runtime.dispatcher.addEndpoint(ep, id.startsWith("remote-extract-") ? { pool: EXTRACT_POOL } : {}).catch(() => {});
   }

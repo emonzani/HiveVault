@@ -206,7 +206,11 @@ export function workspaceRoutes(app: FastifyInstance, sql: Sql, auth: AuthServic
       const fm: Record<string, unknown> = { title: req.body.title.trim(), type: req.body.type ?? "note", author: a.principal.name };
       if (req.body.classification !== undefined) fm.classification = req.body.classification;
       const exists = await PageStore.resolve(sql, [req.params.vaultId], fm.title as string);
-      if (exists.length) throw new AuthError("conflict", `Esiste già una pagina "${exists[0]!.title}" in questo vault.`);
+      if (exists.length) {
+        // the name is unique across classifications, but only a page the caller can read is named
+        const [seen] = await withReader(sql, Access.toReader(a.ctx, [req.params.vaultId]), (tx) => PageStore.resolve(tx, [req.params.vaultId], fm.title as string));
+        throw new AuthError("conflict", seen ? `Esiste già una pagina "${seen.title}" in questo vault.` : "Esiste già una pagina con questo nome in questo vault.");
+      }
       const r = await pages.upsert({ vaultId: req.params.vaultId, frontmatter: fm, body: req.body.body ?? `# ${fm.title}\n\n`, author: a.principal.id });
       await auth.audit.writeNow({ principalId: a.principal.id, action: "page.create", resource: r.page.id, ...meta(req), data: { vault: req.params.vaultId, classification: r.page.classification } });
       return reply.status(201).send({ id: r.page.id, version: r.page.version, path: r.page.path });

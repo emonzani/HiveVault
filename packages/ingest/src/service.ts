@@ -2,7 +2,7 @@
  * Ingestion entry points: uploads, links, re-ingestion, compile now, compile on demand.
  */
 import type { Readable } from "node:stream";
-import { PageStore, PERSONAL, type SearchHit } from "@cb/brain";
+import { PageStore, PERSONAL, type Principal, type SearchHit } from "@cb/brain";
 import type { Sql } from "@cb/db";
 import type { EgressGuard } from "@cb/shared";
 import { createLogger } from "@cb/shared";
@@ -32,16 +32,27 @@ export interface CompileQueue {
   backlogHours: number | null;
 }
 
-/** A source that cannot be changed now: `busy` (a worker runs on it) or `cited` (by other pages). */
+/**
+ * A source that cannot be changed now: `busy` (a worker runs on it), `cited` (by other pages),
+ * `duplicate` (the new content is a source the caller may not read).
+ */
 export class SourceError extends Error {
   constructor(
-    readonly code: "busy" | "cited" | "not_link",
+    readonly code: "busy" | "cited" | "not_link" | "duplicate",
     message: string,
   ) {
     super(message);
     this.name = "SourceError";
   }
 }
+
+export interface AddOptions {
+  classification?: number;
+  compile?: boolean;
+}
+
+/** An upload or a link; `source: null`: the same content as a source the caller may not read. */
+export type Added = { source: Source; created: boolean; taskId: string | null } | { source: null; created: false; taskId: null };
 
 export class IngestService {
   private readonly o: Required<IngestServiceOptions>;
@@ -65,28 +76,39 @@ export class IngestService {
     return id;
   }
 
-  /** A file uploaded by a person: priority 1, compiled by default. */
-  async upload(vaultId: string, data: Readable | Buffer, name: string, by: string | null, o: { classification?: number; compile?: boolean } = {}) {
+  /**
+   * A file uploaded by a person: priority 1, compiled by default. `reader`: the uploader
+   * (`SourceStore.create`); the same bytes as a source it may not read give `source: null`.
+   */
+  upload(vaultId: string, data: Readable | Buffer, name: string, by: string | null, reader: "system", o?: AddOptions): Promise<{ source: Source; created: boolean; taskId: string | null }>;
+  upload(vaultId: string, data: Readable | Buffer, name: string, by: string | null, reader: Principal | "system", o?: AddOptions): Promise<Added>;
+  async upload(vaultId: string, data: Readable | Buffer, name: string, by: string | null, reader: Principal | "system", o: AddOptions = {}): Promise<Added> {
     const compile = o.compile ?? this.o.compileUploads;
-    const { source, created } = await this.store.create(data, { vaultId, name, origin: "upload", createdBy: by, compile, priority: 1, ...(o.classification !== undefined ? { classification: o.classification } : {}) });
+    const { source, created } = await this.store.create(data, { vaultId, name, origin: "upload", createdBy: by, compile, priority: 1, ...(o.classification !== undefined ? { classification: o.classification } : {}) }, reader);
+    if (!source) return { source: null, created: false, taskId: null };
     const taskId = created || source.status === "failed" ? await this.start(source, 1) : source.taskId;
     return { source: (await this.store.get(source.id))!, created, taskId };
   }
 
-  async link(vaultId: string, url: string, by: string | null, o: { classification?: number; compile?: boolean } = {}) {
+  async link(vaultId: string, url: string, by: string | null, reader: Principal | "system", o: AddOptions = {}): Promise<Added> {
     const f = await fetchLink(url, this.egress);
     const compile = o.compile ?? this.o.compileUploads;
-    const { source, created } = await this.store.create(f.data, {
-      vaultId,
-      name: f.name,
-      origin: "link",
-      path: f.url,
-      createdBy: by,
-      compile,
-      priority: 1,
-      meta: { url: f.url, contentType: f.contentType },
-      ...(o.classification !== undefined ? { classification: o.classification } : {}),
-    });
+    const { source, created } = await this.store.create(
+      f.data,
+      {
+        vaultId,
+        name: f.name,
+        origin: "link",
+        path: f.url,
+        createdBy: by,
+        compile,
+        priority: 1,
+        meta: { url: f.url, contentType: f.contentType },
+        ...(o.classification !== undefined ? { classification: o.classification } : {}),
+      },
+      reader,
+    );
+    if (!source) return { source: null, created: false, taskId: null };
     const taskId = created ? await this.start(source, 1) : source.taskId;
     return { source: (await this.store.get(source.id))!, created, taskId };
   }
@@ -111,12 +133,14 @@ export class IngestService {
    * Replaces a link with another URL: the new link is fetched first (a failure leaves the old
    * source as it is), then the old source goes. The new source keeps classification and compile.
    */
-  async relink(sourceId: string, url: string, by: string | null) {
+  async relink(sourceId: string, url: string, by: string | null, reader: Principal | "system") {
     const old = await this.store.get(sourceId);
     if (!old) throw new Error("source not found");
     if (old.origin !== "link") throw new SourceError("not_link", "Solo i documenti aggiunti da un link hanno un indirizzo da cambiare.");
     await this.removable([old.id]);
-    const r = await this.link(old.vaultId, url, by, { classification: old.classification, compile: old.compile });
+    const r = await this.link(old.vaultId, url, by, reader, { classification: old.classification, compile: old.compile });
+    // the new address gives the content of a source the caller may not read: the old link stays
+    if (!r.source) throw new SourceError("duplicate", "Il contenuto di quel link è già nel vault. Il link resta com'era.");
     if (r.source.id !== old.id) await this.remove(old.id);
     return r;
   }

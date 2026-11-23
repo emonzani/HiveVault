@@ -89,7 +89,7 @@ for (const c of world.clients) {
     ``,
     `Il cliente chiede una revisione della sicurezza prima del rinnovo e valuta l'aumento delle postazioni del 20%.`,
   ].join("\n");
-  const up = await s.ingest.upload(hive.id, Buffer.from(doc, "utf8"), `contratto-${c.id}.md`, demo.id, { compile: false, classification: 1 });
+  const up = await s.ingest.upload(hive.id, Buffer.from(doc, "utf8"), `contratto-${c.id}.md`, demo.id, "system", { compile: false, classification: 1 });
   sourceOf.set(c.id, up.source.id);
 }
 // wait for the parse and index phases (I1)

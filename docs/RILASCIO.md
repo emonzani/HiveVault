@@ -67,3 +67,11 @@ Stato: verifica di sviluppo del 2026-11-02 (fase 8). Le voci **[I]** restano da 
 | 6.2 | Primo ciclo notturno concluso (Ciclo notturno: «Completato») | ☐ |
 | 6.3 | Un utente di prova accede, cerca, carica un documento e lo vede «Cercabile» | ☐ |
 | 6.4 | L'agente cloud collegato con un account API: `brain_search` restituisce risultati con citazioni | ☐ |
+
+## 7. Cambiamenti incompatibili [I]
+
+Leggi questa sezione prima di un aggiornamento. Ogni voce dice cosa smette di funzionare e cosa fare.
+
+| # | Cambiamento | Azione | Esito |
+|---|---|---|---|
+| 7.1 | Accesso con firma: il client firma `cb-auth-v2\|<origine>\|<utente>\|<nonce>\|<ts>`. Il server rifiuta il messaggio vecchio `cb-auth-v1` con l'errore `signature_outdated` e non apre la sessione | Aggiorna la CLI e ogni dispositivo edge che accede con firma. Ogni client firma l'origine di `PUBLIC_URL` o di `WEBAUTHN_EXTRA_ORIGINS`. Dopo l'aggiornamento, cerca `login.signature.outdated` nell'audit: ogni evento indica un client da aggiornare ([guida dell'amministratore](guide/amministratore.md#accesso-con-firma-riga-di-comando-e-dispositivi-edge)) | ☐ |

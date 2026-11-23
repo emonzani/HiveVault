@@ -9,6 +9,8 @@ bench/**/out/
 packages/web/e2e/.state/
 packages/web/e2e/.results/
 packages/web/e2e/.report/
+/e2e/.state/
+todo_github.md
 *.gguf
 packages/auth/test/fixtures/*.pem
 .claude/

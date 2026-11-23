@@ -4,11 +4,22 @@ import path from "node:path";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generateFormats, type FormatFile } from "../../../bench/corpus/formats.ts";
+import { elementText } from "../src/formats/office.ts";
 import { detectType, parseFile, ParserPool, stripQuotes, UnsupportedFormatError } from "../src/index.ts";
 
 let dir = "";
 let files: FormatFile[] = [];
 const flat = (s: string) => s.replace(/\s+/g, " ");
+/** A PPTX with these slide XML bodies and, where given, speaker notes. */
+const pptx = async (slides: [string, string?][]) => {
+  const zip = new JSZip();
+  slides.forEach(([slide, notes], i) => {
+    zip.file(`ppt/slides/slide${i + 1}.xml`, `<p:sld><p:cSld><p:spTree>${slide}</p:spTree></p:cSld></p:sld>`);
+    if (notes !== undefined) zip.file(`ppt/notesSlides/notesSlide${i + 1}.xml`, notes);
+  });
+  zip.file("[Content_Types].xml", "<Types/>");
+  return zip.generateAsync({ type: "nodebuffer" });
+};
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), "cb-formats-"));
@@ -75,6 +86,31 @@ describe("format details", () => {
     expect(r.markdown).toMatch(/^## Slide 1 — Titolo vero & unico\n\n- Testo prima/);
   });
 
+  it("pptx: titles, text and notes of well-formed and malformed slides stay as before", async () => {
+    const p = (text: string) => `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>`;
+    const sp = (ph: string, body: string) => `<p:sp><p:nvSpPr><p:nvPr>${ph}</p:nvPr></p:nvSpPr><p:txBody>${body}</p:txBody></p:sp>`;
+    const deck = await pptx([
+      [sp('<p:ph type="ctrTitle"/>', p("Piano &amp; budget")) + sp('<p:ph type="subTitle" idx="1"/>', p("Sottotitolo")), `<p:notes>${p("1")}${p(" Ricordare &lt;la&gt; data ")}</p:notes>`],
+      // an unclosed shape before the title shape: the title runs from the unclosed <p:sp>
+      ["<p:sp>" + p("Orfano") + sp('<p:ph type="title"/>', p("Titolo")) + sp("", p("Corpo"))],
+      [sp("", p("Primo")) + sp('<p:ph type="title"/>', p("Secondo")) + sp('<p:ph type="body"/>', p("Terzo"))],
+      [p("Uno") + p("Due") + "<a:p><a:r><a:t>Perso</a:t>"],
+      // nested <a:p>; a title placeholder in a shape that never closes
+      ["<a:p><a:t>A</a:t><a:p><a:t>B</a:t></a:p></a:p>" + p("C") + '<p:sp><p:ph type="title"/>' + p("Senza chiusura")],
+      // the title shape removed from inside a paragraph
+      ["<a:p><a:t>Prima</a:t>" + sp('<p:ph type="title"/>', p("T")) + "</a:p>" + p("Dopo")],
+      ['<p:ph type="title"/></p:sp>' + sp("", p("Fuori")) + "<p:sp><p:ph type='title'/>" + p("Apici") + "</p:sp>", "<p:notes><a:p><a:t>nota senza chiusura</a:t></p:notes>"],
+      [sp('<p:ph type="title"/>', "<a:p></a:p><a:p><a:t> </a:t></a:p>") + p("Corpo &#233;")],
+    ]);
+    const r = await parseFile(deck, "deck.pptx");
+    expect(r.markdown).toBe(
+      "## Slide 1 — Piano & budget\n\n- Sottotitolo\n\n> Note del relatore: Ricordare <la> data\n\n## Slide 2 — Orfano Titolo\n\n- Corpo\n\n" +
+        "## Slide 3 — Secondo\n\n- Primo\n- Terzo\n\n## Slide 4 — Uno\n\n- Due\n\n## Slide 5 — AB\n\n- C\n- Senza chiusura\n\n" +
+        "## Slide 6 — T\n\n- Prima\n- Dopo\n\n## Slide 7 — Fuori\n\n- Apici\n\n## Slide 8\n\n- Corpo é",
+    );
+    expect(r.meta).toMatchObject({ slides: 8 });
+  });
+
   it("xlsx: one section per sheet, formulas as their values", async () => {
     const r = await parse("xlsx/listino-0.xlsx");
     expect(r.markdown).toMatch(/## Foglio: Ordini/);
@@ -135,6 +171,67 @@ describe("format details", () => {
   });
 });
 
+describe("office core properties (docProps/core.xml)", () => {
+  const TAGS = ["dc:title", "dc:creator", "dcterms:created", "dcterms:modified"];
+  // The regex the parser used before; it is quadratic, so only short inputs here.
+  const reference = (xml: string, t: string) => new RegExp(`<${t}[^>]*>([^<]*)</${t}>`).exec(xml)?.[1];
+  const deck = async (core: string | undefined) => {
+    const zip = new JSZip();
+    zip.file("ppt/slides/slide1.xml", "<p:sld><p:cSld><p:spTree></p:spTree></p:cSld></p:sld>");
+    zip.file("[Content_Types].xml", "<Types/>");
+    if (core !== undefined) zip.file("docProps/core.xml", core);
+    const r = await parseFile(await zip.generateAsync({ type: "nodebuffer" }), "deck.pptx");
+    return { title: r.title, meta: r.meta };
+  };
+  const head = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`;
+
+  it("keeps the metadata of well-formed and malformed core.xml", async () => {
+    const cases: [string | undefined, { title?: string; meta: Record<string, unknown> }][] = [
+      [
+        head +
+          `<dc:title>Analisi &amp; &lt;piano&gt;</dc:title><dc:creator> Mario Rossi </dc:creator>` +
+          `<dcterms:created xsi:type="dcterms:W3CDTF">2026-01-02T03:04:05Z</dcterms:created>` +
+          `<dcterms:modified xsi:type="dcterms:W3CDTF">2026-02-03T04:05:06Z</dcterms:modified></cp:coreProperties>`,
+        { title: "Analisi & <piano>", meta: { author: "Mario Rossi", created: "2026-01-02T03:04:05Z", modified: "2026-02-03T04:05:06Z", slides: 1 } },
+      ],
+      [undefined, { meta: { slides: 1 } }],
+      ["", { meta: { slides: 1 } }],
+      [`<dc:title></dc:title><dc:creator>  </dc:creator><dc:title/>`, { meta: { slides: 1 } }],
+      [`<dc:title><dc:title>Secondo</dc:title><dc:title>Terzo</dc:title>`, { title: "Secondo", meta: { slides: 1 } }],
+      [`<dc:titleX>Prefisso</dc:title><dc:creator a="<b">Autore</dc:creator>`, { title: "Prefisso", meta: { author: "Autore", slides: 1 } }],
+      [`<dc:title>Aperto<dcterms:created>2026</dcterms:created>`, { meta: { created: "2026", slides: 1 } }],
+      [`<dc:creator/><dc:creator>Dopo</dc:creator><dcterms:modified>&#65;&amp;lt;</dcterms:modified>`, { meta: { author: "Dopo", modified: "A&lt;", slides: 1 } }],
+      [`<dc:title`, { meta: { slides: 1 } }],
+      [`<dc:title>coda`, { meta: { slides: 1 } }],
+    ];
+    for (const [core, expected] of cases) expect(await deck(core), String(core)).toEqual(expected);
+  });
+
+  it("finds the same element text as the old regex (all strings of up to 5 tokens)", () => {
+    const tokens = ["<dc:title", ">", "<", "</dc:title>", "</dc:title", "x", "/", "<dc:titl", "e"];
+    let strings = 0;
+    const mismatches: string[] = [];
+    const walk = (s: string, depth: number) => {
+      strings++;
+      for (const t of TAGS) if (elementText(s, t) !== reference(s, t)) mismatches.push(`${t}: ${JSON.stringify(s)}`);
+      if (depth > 0) for (const tok of tokens) walk(s + tok, depth - 1);
+    };
+    walk("", 5);
+    expect(mismatches).toEqual([]);
+    expect(strings).toBe(66_430);
+  });
+
+  it("parses a hostile core.xml in linear time", async () => {
+    // Thousands of "<dc:title" before one far ">": the old regex rescanned to it from each one.
+    const hostile = "<dc:title".repeat(400_000) + "><x/><dc:title>Titolo</dc:title>";
+    const started = performance.now();
+    expect(elementText(hostile, "dc:title")).toBe("Titolo");
+    for (const t of TAGS) expect(elementText(`<${t}`.repeat(400_000) + "><b>", t)).toBeUndefined();
+    expect(await deck(hostile)).toEqual({ title: "Titolo", meta: { slides: 1 } });
+    expect(performance.now() - started).toBeLessThan(5000);
+  });
+});
+
 describe("detection and safety", () => {
   it("detects the format from the content, not the name", async () => {
     const pdf = await readFile(path.join(dir, "pdf/verbale-0.pdf"));
@@ -159,6 +256,22 @@ describe("detection and safety", () => {
     for (let i = 0; i < 3; i++) zip.file(`f${i}.txt`, "x");
     const r = await parseFile(await zip.generateAsync({ type: "nodebuffer" }), "a.zip");
     expect(r.attachments).toHaveLength(3);
+  });
+
+  it("pptx: unclosed shapes and paragraphs take linear time", async () => {
+    // The old regexes rescanned to the end of the slide from every opener: about 40 s here.
+    // Slide 3 checks that the title placeholder search does not rescan for each shape.
+    const n = 100_000;
+    const deck = await pptx([
+      ["<p:sp>".repeat(n)],
+      ["<p:sp>".repeat(n) + "</p:sp>"],
+      ["<p:sp></p:sp>".repeat(n) + '<p:ph type="title"/>'],
+      ["<a:p>".repeat(n), "<a:p>".repeat(n)],
+    ]);
+    const start = performance.now();
+    const r = await parseFile(deck, "deck.pptx");
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(r.markdown).toBe("## Slide 1\n\n## Slide 2\n\n## Slide 3\n\n## Slide 4");
   });
 
   it("removes quoted replies in Italian and English", () => {

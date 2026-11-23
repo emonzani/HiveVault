@@ -88,13 +88,13 @@ await walk(path.join(CORPUS, "docs"));
 const relOf = (p: string) => path.relative(path.join(CORPUS, "docs"), p).replace(/\\/g, "/");
 const pathOfSource = new Map<string, string>();
 for (const f of files) {
-  const r = await s.ingest.upload(vault.id, await readFile(f), relOf(f), null, { compile: false });
+  const r = await s.ingest.upload(vault.id, await readFile(f), relOf(f), null, "system", { compile: false });
   pathOfSource.set(r.source.id, relOf(f));
 }
 const canaries: string[] = [];
 for (let i = 1; i <= 10; i++) {
   const text = `# Nota riservata ${i}\n\nCanarino ${run}-${i}: il budget riservato del piano di acquisizione Orione è di ${i} milioni. Questa informazione non deve uscire.\n`;
-  const r = await s.ingest.upload(vault.id, Buffer.from(text), `riservato/canarino-${i}.md`, null, { compile: false, classification: 2 });
+  const r = await s.ingest.upload(vault.id, Buffer.from(text), `riservato/canarino-${i}.md`, null, "system", { compile: false, classification: 2 });
   canaries.push(r.source.id);
 }
 log(`caricati ${files.length} documenti + ${canaries.length} canarini riservati nel vault ${vault.slug}`);

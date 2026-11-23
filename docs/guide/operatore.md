@@ -22,7 +22,7 @@ I log non contengono segreti: i valori di token, codici, chiavi e cookie sono so
 | Dato | Dove | Come |
 |---|---|---|
 | Database (pagine, metadati, vettori, utenti, audit) | Volume `pgdata` | pgBackRest: archiviazione continua del WAL + backup completi e differenziali |
-| Documenti originali (cifrati) | `data/blobs/` | Copia dei file con lo strumento di backup dell'azienda (sono già cifrati) |
+| Documenti originali (cifrati) | `data/blobs/` | Copia dei file con lo strumento di backup dell'azienda (sono già cifrati, anche i nomi dei file: §4.4) |
 | Chiave principale | `data/.master-key` | Copia offline, una volta (vedi installazione, §3) |
 | Configurazione | `.env` | Copia offline, dopo ogni modifica |
 | Esportazioni dei vault | `data/exports/` | Facoltativo: Markdown leggibile senza il server |
@@ -130,6 +130,8 @@ Sul server lo script:
 
 Il ritorno alla versione precedente non annulla le migrazioni del database. Se una migrazione causa un problema, ripristina il backup fatto dallo script (§3.1, ripristino a un istante prima dell'aggiornamento).
 
+Dopo il primo avvio di una versione con i nomi cifrati dei documenti originali, non tornare a una versione precedente (§4.4).
+
 Prima installazione con lo stesso script:
 
 ```bash
@@ -173,6 +175,16 @@ Ogni computer client deve considerare attendibile la CA che ha firmato il certif
 6. Controlla **Dashboard → Panoramica** e la pagina **Modelli**.
 
 Le migrazioni sono file SQL numerati, applicati una volta sola. Non modificare una migrazione già applicata: aggiungine una nuova.
+
+### 4.4 Nomi cifrati dei documenti originali (senza ritorno)
+
+Il nome di ogni file in `data/blobs/` è un HMAC dell'impronta SHA-256 del documento, con una chiave per vault derivata dalla chiave principale. Senza la chiave, una copia di `data/blobs/` non mostra quali documenti noti contiene. Le versioni precedenti usavano come nome l'impronta SHA-256 (`<vault>/ab/cd/<sha256>`).
+
+1. Il primo avvio della nuova versione cambia i nomi vecchi in nomi cifrati. Il server fa il cambio in background, dopo l'avvio: risponde subito a `/api/health` e agli utenti. Durante il cambio, il server legge i file con il nome vecchio e con il nome nuovo.
+2. Il log del servizio mostra l'avanzamento (`blob name migration in progress`) e il risultato (`blob name migration done`) con i numeri dei file. Il log non contiene nomi di file. Se il servizio si ferma prima della fine, l'avvio successivo continua il cambio.
+3. Se la chiave principale non apre i file di un vault, il server non cambia i nomi di quel vault e scrive un avviso con l'id del vault (`the master key does not open its blobs`). Il server continua a leggere i file con il nome vecchio. Controlla `BRAIN_MASTER_KEY` (o `data/.master-key`) e riavvia il servizio.
+4. Il cambio è senza ritorno: le versioni precedenti non leggono i nomi cifrati. Dopo il primo avvio non usare `bash scripts/deploy.sh --rollback` e non installare a mano una versione precedente. Se lo script di aggiornamento torna da solo alla versione precedente, cerca `blob name migration` nel log. Se il cambio è cominciato, aggiorna di nuovo alla nuova versione.
+5. I backup di `data/blobs/` fatti prima dell'aggiornamento conservano i nomi vecchi. La nuova versione legge questi file dopo un ripristino e cambia i loro nomi all'avvio successivo. Questi backup mostrano ancora quali documenti noti contiene ogni vault: proteggili come i dati del server, oppure sostituiscili con una nuova copia dopo il cambio.
 
 ## 5. Controllo
 

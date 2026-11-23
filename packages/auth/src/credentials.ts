@@ -7,7 +7,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { Sql } from "@cb/db";
-import { base32Encode, randomToken, SecretBox, safeEqual, sha256hex } from "./crypto.ts";
+import { base32Encode, KeyedHash, randomToken, SecretBox, safeEqual, sha256hex } from "./crypto.ts";
 import { AuthError } from "./errors.ts";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.ts";
 import { isUsable, principalCols, type PrincipalRow } from "./principals.ts";
@@ -18,12 +18,24 @@ function friendlyCode(): string {
 }
 const normalizeCode = (c: string) => c.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+/** Plain SHA-256 of a recovery code: the stored form before the keyed hash. */
+const plainRecoveryHash = (principalId: string, code: string) => sha256hex(`${principalId}:${normalizeCode(code)}`);
+/** Prefix of a recovery code stored as a keyed hash. Rows without it hold the plain SHA-256. */
+const KEYED = "k1:";
+
 export class TotpCredentials {
   constructor(
     private readonly sql: Sql,
     private readonly box: SecretBox,
+    /** Key of the recovery code hashes: a copy of the database alone cannot test a guessed code. */
+    private readonly recoveryKey: KeyedHash,
     private readonly issuer = "HiveVault",
   ) {}
+
+  /** Stored form of a recovery code: its plain SHA-256 under the keyed hash. */
+  private recoveryHash(plain: string): string {
+    return KEYED + this.recoveryKey.hex(plain);
+  }
 
   async createEnrollment(principalId: string, createdBy: string | null, ttlMs = 24 * 3600_000): Promise<{ code: string; expiresAt: Date }> {
     const code = friendlyCode();
@@ -64,7 +76,7 @@ export class TotpCredentials {
       await tx`update enrollments set used_at = now() where code_hash = ${sha256hex(normalizeCode(code))}`;
       await tx`delete from recovery_codes where principal_id = ${e.principalId}`;
       const codes = Array.from({ length: 10 }, () => base32Encode(randomBytes(5)).toLowerCase().replace(/(.{4})/, "$1-"));
-      for (const c of codes) await tx`insert into recovery_codes (principal_id, code_hash) values (${e.principalId}, ${sha256hex(`${e.principalId}:${normalizeCode(c)}`)})`;
+      for (const c of codes) await tx`insert into recovery_codes (principal_id, code_hash) values (${e.principalId}, ${this.recoveryHash(plainRecoveryHash(e.principalId, c))})`;
       return { principalId: e.principalId, recoveryCodes: codes };
     }) as Promise<{ principalId: string; recoveryCodes: string[] }>;
   }
@@ -86,10 +98,28 @@ export class TotpCredentials {
   }
 
   async verifyRecovery(principalId: string, code: string): Promise<boolean> {
+    const plain = plainRecoveryHash(principalId, code);
+    // a row that upgradeRecoveryCodes has not rewritten yet holds the plain hash: it also works once
     const r = await this.sql`
       update recovery_codes set used_at = now()
-      where principal_id = ${principalId} and code_hash = ${sha256hex(`${principalId}:${normalizeCode(code)}`)} and used_at is null`;
+      where principal_id = ${principalId} and code_hash in (${this.recoveryHash(plain)}, ${plain}) and used_at is null`;
     return r.count === 1;
+  }
+
+  /**
+   * Rewrites the recovery codes stored as plain SHA-256 (issued before the keyed hash) into the
+   * keyed form. The codes stay valid and keep their used state. Idempotent; returns the rows changed.
+   */
+  async upgradeRecoveryCodes(): Promise<number> {
+    const rows = await this.sql<{ principalId: string; codeHash: string }[]>`
+      select principal_id as "principalId", code_hash as "codeHash" from recovery_codes where code_hash not like ${KEYED + "%"}`;
+    let n = 0;
+    for (const r of rows) {
+      const u = await this.sql`
+        update recovery_codes set code_hash = ${this.recoveryHash(r.codeHash)} where principal_id = ${r.principalId} and code_hash = ${r.codeHash}`;
+      n += u.count;
+    }
+    return n;
   }
 
   async remainingRecoveryCodes(principalId: string): Promise<number> {

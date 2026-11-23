@@ -6,6 +6,8 @@
  *
  *   allowed always   Unix sockets / named pipes, loopback (127.0.0.0/8, ::1, localhost)
  *   allowed by list  the configured hosts: database, model servers (local and remote)
+ *   private only     model servers added from the console: `allowUrls(urls, { privateOnly })`;
+ *                    the address is checked when the connection resolves it, as for `publicOnly`
  *   allowed once     a link the user asked to import: `egress.allowFor(host, fn)` opens the
  *                    host only for the async work started inside `fn`; with `publicOnly`
  *                    the address is checked when the connection resolves it (DNS rebinding:
@@ -35,6 +37,8 @@ export class EgressBlockedError extends Error {
 
 export class EgressGuard {
   private readonly allowed = new Set<string>();
+  /** Hosts allowed only while they resolve to private addresses (not in `allowed`). */
+  private readonly allowedPrivate = new Set<string>();
   private readonly scope = new AsyncLocalStorage<{ hosts: Set<string>; publicOnly: Set<string> }>();
   private original: typeof net.Socket.prototype.connect | undefined;
   blocked = 0;
@@ -48,12 +52,17 @@ export class EgressGuard {
     if (v) this.allowed.add(v);
   }
 
-  /** Allows hosts given as URLs (e.g. the model endpoints) — host and host:port. */
-  allowUrls(urls: string[]): void {
+  /**
+   * Allows hosts given as URLs (e.g. the model endpoints) — host and host:port. With
+   * `privateOnly`, a connection that only this entry allows fails when the name resolves to a
+   * public address (DNS rebinding: a check when the host is added does not hold).
+   */
+  allowUrls(urls: string[], o: { privateOnly?: boolean } = {}): void {
     for (const u of urls) {
       try {
         const url = new URL(u);
-        this.allow(url.hostname);
+        if (!o.privateOnly) this.allow(url.hostname);
+        else if (url.hostname) this.allowedPrivate.add(url.hostname.toLowerCase());
       } catch {
         /* not a URL: ignore */
       }
@@ -112,13 +121,23 @@ export class EgressGuard {
       if (!isPath && guard.publicOnly(host) && typeof a0 === "object" && a0 !== null) {
         const opt = a0 as { lookup?: unknown };
         if (net.isIP(host.replace(/^\[|\]$/g, ""))) {
-          if (isPrivateAddress(host.replace(/^\[|\]$/g, ""))) return guard.block(this, host, port);
+          if (isNonPublicAddress(host.replace(/^\[|\]$/g, ""))) return guard.block(this, host, port);
         } else {
           opt.lookup = publicLookup;
         }
       }
       if (!isPath && !guard.isAllowed(host, port)) {
-        return guard.block(this, host, port);
+        // a private-only host: an address literal is checked here, a name when the socket resolves it
+        const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+        if (!guard.allowedPrivate.has(h)) return guard.block(this, host, port);
+        if (net.isIP(h)) {
+          if (!isPrivateAddress(h)) return guard.block(this, host, port);
+        } else if (typeof a0 === "object" && a0 !== null) {
+          (a0 as { lookup?: unknown }).lookup = privateLookup;
+        } else {
+          // connect(port, host): no lookup to check the resolved address
+          return guard.block(this, host, port);
+        }
       }
       return original.apply(this, args as Parameters<typeof original>);
     } as typeof net.Socket.prototype.connect;
@@ -146,7 +165,18 @@ export class EgressGuard {
 function publicLookup(hostname: string, options: dns.LookupOptions, cb: (err: Error | null, address: string | dns.LookupAddress[], family?: number) => void): void {
   dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
     if (err) return cb(err, "");
-    const bad = addrs.find((a) => isPrivateAddress(a.address));
+    const bad = addrs.find((a) => isNonPublicAddress(a.address));
+    if (bad || !addrs.length) return cb(new EgressBlockedError(bad?.address ?? hostname, 0), "");
+    if (options.all) return cb(null, addrs);
+    cb(null, addrs[0]!.address, addrs[0]!.family);
+  });
+}
+
+/** `lookup` of sockets to private-only hosts: every resolved address must be private. */
+function privateLookup(hostname: string, options: dns.LookupOptions, cb: (err: Error | null, address: string | dns.LookupAddress[], family?: number) => void): void {
+  dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    if (err) return cb(err, "");
+    const bad = addrs.find((a) => !isPrivateAddress(a.address));
     if (bad || !addrs.length) return cb(new EgressBlockedError(bad?.address ?? hostname, 0), "");
     if (options.all) return cb(null, addrs);
     cb(null, addrs[0]!.address, addrs[0]!.family);
@@ -164,4 +194,33 @@ export function isPrivateAddress(ip: string): boolean {
   }
   const v6 = ip.toLowerCase();
   return v6 === "::" || v6 === "::1" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe80") || v6.startsWith("ff");
+}
+
+/**
+ * Check of the blocking side (link imports, public-only hosts): true when `ip` must not be
+ * reached. Like `isPrivateAddress`, but an IPv4-mapped IPv6 address (::ffff:0:0/96) is
+ * classified by its IPv4 address in any textual form: the URL parser rewrites
+ * [::ffff:127.0.0.1] to [::ffff:7f00:1], and a dual-stack socket connects to 127.0.0.1.
+ */
+export function isNonPublicAddress(ip: string): boolean {
+  return isPrivateAddress(mappedIPv4(ip) ?? ip);
+}
+
+/** The IPv4 address of an IPv4-mapped IPv6 address (::ffff:a.b.c.d, ::ffff:7f00:1, ...), else undefined. */
+function mappedIPv4(ip: string): string | undefined {
+  const addr = ip.replace(/%.*$/, "").toLowerCase(); // zone id: fe80::1%eth0
+  if (!net.isIPv6(addr)) return undefined;
+  let text = addr;
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted[1]!.split(".").map(Number) as [number, number, number, number];
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.split("::") as [string, string | undefined];
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array<string>(8 - left.length - right.length).fill("0"), ...right];
+  const n = groups.map((g) => parseInt(g, 16));
+  if (n.length !== 8 || n.slice(0, 5).some((g) => g !== 0) || n[5] !== 0xffff) return undefined;
+  return `${n[6]! >> 8}.${n[6]! & 255}.${n[7]! >> 8}.${n[7]! & 255}`;
 }

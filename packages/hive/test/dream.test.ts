@@ -200,4 +200,37 @@ Norma.
     await cycle(3, true);
     expect((await body()).match(/\[\[/g)).toHaveLength(1);
   });
+
+  db()("dedup leaves a private page it would merge into a visible one to the curators", async () => {
+    const md = (t: string, extra = "") => `---\ntitle: ${t}\ntype: entity/company\n${extra}---\n# ${t}\n\n## Stato attuale\n- Postazioni: 5\n`;
+    const dedup = STEPS.find((s) => s.name === "dedup")!;
+    const step = (vaultId: string) => dedup.run({ deps: { sql: sql!, pages: pages! }, vaultId, kind: "cell", cursor: null, since: null, signal: new AbortController().signal, night: "2020-01-01" });
+    const exists = async (id: string) => (await sql!`select 1 from pages where id = ${id}`).length === 1;
+
+    // the visible page has the backlink, so it is the keeper and the private page would go
+    const c1 = await vaults!.create({ kind: "cell", slug: `dv1-${run}`, name: "Cella 1" });
+    const visible = await pages!.upsert({ vaultId: c1.id, markdown: md(`Gamma ${run} srl`) });
+    const secret = await pages!.upsert({ vaultId: c1.id, markdown: md(`Gamma ${run} S.r.l.`, "visibility: privato\n") });
+    await pages!.upsert({ vaultId: c1.id, markdown: `---\ntitle: Rimando ${run}\ntype: note\n---\nVedi [[Gamma ${run} srl]].` });
+    expect((await step(c1.id)).report).toMatchObject({ unite: 0, "da rivedere": 1 });
+    expect(await exists(visible.page.id)).toBe(true);
+    expect(await exists(secret.page.id)).toBe(true);
+    const items = await sql!<{ id: string; status: string; data: { a: { id: string }; b: { id: string } } }[]>`select id, status, data from curator_items where space_id = ${c1.id} and kind = 'duplicate'`;
+    expect(items).toHaveLength(1);
+    expect([items[0]!.data.a.id, items[0]!.data.b.id].sort()).toEqual([visible.page.id, secret.page.id].sort());
+    // a dismissed pair stays dismissed and unmerged
+    await sql!`update curator_items set status = 'dismissed' where id = ${items[0]!.id}`;
+    await step(c1.id);
+    expect((await sql!<{ status: string }[]>`select status from curator_items where id = ${items[0]!.id}`)[0]!.status).toBe("dismissed");
+    expect(await exists(secret.page.id)).toBe(true);
+
+    // the private page has the backlink: it is kept, absorbs the visible one and stays private
+    const c2 = await vaults!.create({ kind: "cell", slug: `dv2-${run}`, name: "Cella 2" });
+    const secret2 = await pages!.upsert({ vaultId: c2.id, markdown: md(`Delta ${run} srl`, "visibility: privato\n") });
+    const visible2 = await pages!.upsert({ vaultId: c2.id, markdown: md(`Delta ${run} S.r.l.`) });
+    await pages!.upsert({ vaultId: c2.id, markdown: `---\ntitle: Rimando ${run}\ntype: note\n---\nVedi [[Delta ${run} srl]].` });
+    expect((await step(c2.id)).report).toMatchObject({ unite: 1, "da rivedere": 0 });
+    expect(await exists(visible2.page.id)).toBe(false);
+    expect((await sql!<{ visibility: number }[]>`select visibility from pages where id = ${secret2.page.id}`)[0]!.visibility).toBe(0);
+  });
 });

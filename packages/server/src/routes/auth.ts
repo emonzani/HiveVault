@@ -51,14 +51,15 @@ export function authRoutes(app: FastifyInstance, auth: AuthService, secure: bool
     async (req) => auth.signature.challenge(req.query.username),
   );
 
-  app.post<{ Body: { username: string; challengeId: string; ts: number; signature: string } }>(
+  // `origin`: the origin the client signed; optional, it only explains a refusal (origin_mismatch)
+  app.post<{ Body: { username: string; challengeId: string; ts: number; signature: string; origin?: string } }>(
     "/api/auth/challenge",
     {
       schema: {
         body: {
           type: "object",
           required: ["username", "challengeId", "ts", "signature"],
-          properties: { username: str(64), challengeId: str(64), ts: { type: "integer" }, signature: str(512) },
+          properties: { username: str(64), challengeId: str(64), ts: { type: "integer" }, signature: str(512), origin: str(255) },
           additionalProperties: false,
         },
       },

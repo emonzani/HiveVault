@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
 import type { BlobStore } from "@cb/blobs";
-import { bumpVersion, chunkMarkdown, isPersonalOwner, PERSONAL, PersonalClassificationError, type ChunkOptions } from "@cb/brain";
+import { bumpVersion, chunkMarkdown, isPersonalOwner, PERSONAL, PersonalClassificationError, withReader, type ChunkOptions, type Principal } from "@cb/brain";
 import type { Sql } from "@cb/db";
 import { estimateTokens, newId } from "@cb/shared";
 
@@ -55,6 +55,9 @@ export interface NewSource {
   meta?: Record<string, unknown>;
 }
 
+/** A new or known source; `source: null` is a known source the caller may not read. */
+export type CreatedSource = { source: Source; created: boolean } | { source: null; created: false };
+
 /** Max nesting of attachments (an email with a ZIP with an email with ...). */
 export const MAX_DEPTH = 4;
 
@@ -67,8 +70,15 @@ export class SourceStore {
   /**
    * Stores the original file (L0, encrypted) and registers it. The same content in the same
    * vault is one source: `created: false` returns the existing one.
+   *
+   * `reader`: who asks. A person or an API account learns of an existing source only when it
+   * may read it (RLS); otherwise the result is `{ source: null, created: false }` and the
+   * existing source does not change. An attachment of the same parent is the parent's own
+   * earlier insert (a parse that ran again). "system": jobs that see every source.
    */
-  async create(data: Readable | Buffer, s: NewSource): Promise<{ source: Source; created: boolean }> {
+  create(data: Readable | Buffer, s: NewSource, reader: "system"): Promise<{ source: Source; created: boolean }>;
+  create(data: Readable | Buffer, s: NewSource, reader: Principal | "system"): Promise<CreatedSource>;
+  async create(data: Readable | Buffer, s: NewSource, reader: Principal | "system"): Promise<CreatedSource> {
     const [vault] = await this.sql<{ dc: number; owner: string | null }[]>`select default_classification as dc, owner from vaults where id = ${s.vaultId}`;
     if (!vault) throw new Error(`vault ${s.vaultId} not found`);
     if ((s.classification ?? vault.dc) === PERSONAL && !isPersonalOwner(vault.owner)) throw new PersonalClassificationError();
@@ -82,6 +92,10 @@ export class SourceStore {
       returning ${this.sql.unsafe(COLS)}`;
     if (rows[0]) return { source: rows[0], created: true };
     const [existing] = await this.sql<Source[]>`select ${this.sql.unsafe(COLS)} from sources where vault_id = ${s.vaultId} and sha256 = ${put.sha256}`;
+    if (reader !== "system" && !(s.parentId && existing!.parentId === s.parentId)) {
+      const seen = await withReader(this.sql, reader, (tx) => tx`select 1 from sources where id = ${existing!.id}`);
+      if (!seen.length) return { source: null, created: false };
+    }
     // asking again to compile a known source is a request to compile it
     if (s.compile && !existing!.compile) await this.sql`update sources set compile = true where id = ${existing!.id}`;
     return { source: { ...existing!, compile: existing!.compile || !!s.compile }, created: false };

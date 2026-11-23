@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
+import JSZip from "jszip";
 import { AuthService, base32Decode, totp } from "@cb/auth";
 import { FsBlobStore } from "@cb/blobs";
 import { EmbeddingIndexer, PageStore, SearchEngine, VaultStore } from "@cb/brain";
@@ -35,6 +36,7 @@ const task = sql
       compiler: new Compiler(sql, store!, new PageStore(sql), search!, dispatcher, { useModel: "never" }),
       chunk: { minTokens: 1 },
       name: `ingest-e2e-${run}`,
+      readerOf: (id) => auth!.access.readerOf(id),
     })
   : undefined;
 const engine = sql ? new TaskEngine(sql, { pollMs: 50 }).register(task!) : undefined;
@@ -76,8 +78,8 @@ class Client {
   }
 }
 
-async function user(perm: "read" | "write" | "curate" | null, vaultId: string): Promise<Client> {
-  const p = await auth!.principals.createUser({ username: `s${run}-${Math.random().toString(36).slice(2, 7)}`, displayName: "U" });
+async function user(perm: "read" | "write" | "curate" | null, vaultId: string, clearance?: number): Promise<Client> {
+  const p = await auth!.principals.createUser({ username: `s${run}-${Math.random().toString(36).slice(2, 7)}`, displayName: "U", ...(clearance !== undefined ? { clearance } : {}) });
   if (perm) await auth!.access.grant(p.id, vaultId, perm, null);
   const { code } = await auth!.totp.createEnrollment(p.id, null);
   const start = await auth!.totp.startEnrollment(code);
@@ -225,6 +227,59 @@ Vedi.^[${id}#c1]` });
     expect(await store!.blobs.has(v.id, blob!.sha)).toBe(false);
     const [a] = await sql!<{ action: string }[]>`select action from audit_log where resource = ${id} and action = 'source.delete'`;
     expect(a).toBeTruthy();
+  });
+
+  db()("the same bytes as a source the caller cannot read: a generic answer, the source does not change", async () => {
+    const v = await vaults!.create({ kind: "space", slug: `srcdup-${run}`, name: "D" });
+    const writer = await user("write", v.id, 1);
+    const secret = Buffer.from(`Segreto ${run}: piano di riorganizzazione.`);
+    const { source: hidden } = await store!.create(secret, { vaultId: v.id, name: "piano-riservato.txt", origin: "upload", classification: 3 }, "system");
+    const up = await writer.upload(v.id, [{ name: "copia.txt", data: secret }], { compile: "true" });
+    expect(up.statusCode).toBe(202);
+    expect(up.json().sources).toEqual([{ name: "copia.txt", duplicate: true }]);
+    const rows = await sql!<{ id: string; name: string; compile: boolean; taskId: string | null }[]>`
+      select id, name, compile, task_id as "taskId" from sources where vault_id = ${v.id} and sha256 = ${hidden.sha256}`;
+    expect(rows).toEqual([{ id: hidden.id, name: "piano-riservato.txt", compile: false, taskId: null }]);
+    await auth!.audit.flush();
+    const [audit] = await sql!<{ resource: string | null; data: Record<string, unknown> }[]>`
+      select resource, data from audit_log where action = 'source.upload' and data->>'vault' = ${v.id}`;
+    expect(audit).toMatchObject({ resource: null, data: { name: "copia.txt", duplicate: true } });
+
+    // a source the caller can read: the answer names it, as before
+    const open = Buffer.from(`Interno ${run}: orari della mensa.`);
+    const { source: known } = await store!.create(open, { vaultId: v.id, name: "mensa.txt", origin: "upload", classification: 1 }, "system");
+    const again = (await writer.upload(v.id, [{ name: "mensa-copia.txt", data: open }], { compile: "true" })).json().sources[0];
+    expect(again).toMatchObject({ id: known.id, name: "mensa.txt", created: false });
+    expect((await store!.get(known.id))!.compile).toBe(true);
+  });
+
+  db()("archive members never change a source the uploader cannot read; a readable one changes as before", async () => {
+    const v = await vaults!.create({ kind: "space", slug: `srczip-${run}`, name: "Z" });
+    const writer = await user("write", v.id, 1);
+    const secret = Buffer.from(`Segreto ${run}: elenco dei tagli.`);
+    const open = Buffer.from(`Interno ${run}: calendario delle ferie.`);
+    const { source: hidden } = await store!.create(secret, { vaultId: v.id, name: "tagli.txt", origin: "upload", classification: 3 }, "system");
+    const { source: known } = await store!.create(open, { vaultId: v.id, name: "ferie.txt", origin: "upload", classification: 1 }, "system");
+    const zip = new JSZip();
+    zip.file("a.txt", secret);
+    zip.file("b.txt", open);
+    zip.file("c.txt", `Nuovo ${run}: verbale della riunione.`);
+    const up = await writer.upload(v.id, [{ name: "pacchetto.zip", data: await zip.generateAsync({ type: "nodebuffer" }) }], { compile: "true" });
+    const id = up.json().sources[0].id;
+    await waitLevel(writer, id, 1);
+
+    const [h] = await sql!<{ compile: boolean; parentId: string | null; taskId: string | null }[]>`
+      select compile, parent_id as "parentId", task_id as "taskId" from sources where id = ${hidden.id}`;
+    expect(h).toEqual({ compile: false, parentId: null, taskId: null });
+    expect((await store!.get(known.id))!).toMatchObject({ compile: true, parentId: null, taskId: null });
+    const children = await sql!<{ name: string }[]>`select name from sources where parent_id = ${id}`;
+    expect(children.map((c) => c.name)).toEqual(["c.txt"]);
+
+    // a parse that runs again finds its own members, also with a reader that sees nothing
+    const nobody = { id: "nessuno", vaults: [], clearance: -1 };
+    const retry = await store!.create(Buffer.from(`Nuovo ${run}: verbale della riunione.`), { vaultId: v.id, name: "c.txt", origin: "attachment", parentId: id }, nobody);
+    expect(retry).toMatchObject({ created: false, source: { parentId: id, name: "c.txt" } });
+    expect((await store!.create(secret, { vaultId: v.id, name: "a.txt", origin: "attachment", parentId: id }, nobody)).source).toBeNull();
   });
 
   db()("server-sent events report status changes of the caller's vaults", async () => {

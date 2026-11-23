@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { Sql } from "@cb/db";
 import { setupTestDb } from "@cb/db/testing";
 import { ulid } from "@cb/shared";
-import { PageStore, VaultStore, withReader, type Principal } from "../src/index.ts";
+import { PageStore, VaultStore, version, versions, withReader, type Principal } from "../src/index.ts";
 
 const sql: Sql | undefined = await setupTestDb();
 afterAll(async () => {
@@ -158,6 +158,107 @@ describe("Row Level Security (reader role)", () => {
     // a principal with clearance 2 sees the riservato page
     const hr = await withReader(sql!, { ...reader, clearance: 2 }, (tx) => tx<{ id: string }[]>`select id from pages order by title`);
     expect(hr.map((r) => r.id).sort()).toEqual([pa.page.id, ps.page.id].sort());
+  });
+
+  db()("an earlier version keeps its classification when the page is lowered", async () => {
+    const v = await newVault("rls-versions");
+    const r1 = await pages().upsert({ vaultId: v.id, markdown: "---\ntitle: Gara\nclassification: segreto\n---\nOfferta: 1.234.000 euro." });
+    const r2 = await pages().upsert({ vaultId: v.id, id: r1.page.id, markdown: "---\ntitle: Gara\nclassification: interno\n---\nOfferta inviata." });
+    expect(r2.page.version).toBe(2);
+    const [stored] = await sql!<{ classification: number }[]>`select classification from page_versions where page_id = ${r1.page.id} and version = 1`;
+    expect(stored!.classification).toBe(3);
+
+    const low: Principal = { id: "user:low", vaults: [v.id], clearance: 1 };
+    expect((await versions(sql!, low, r1.page.id))!.map((x) => x.version)).toEqual([2]);
+    expect(await version(sql!, low, r1.page.id, 1)).toBeUndefined();
+    expect(await withReader(sql!, low, (tx) => tx`select 1 from page_versions where page_id = ${r1.page.id}`)).toHaveLength(0);
+
+    const high: Principal = { ...low, id: "user:high", clearance: 3 };
+    expect((await versions(sql!, high, r1.page.id))!.map((x) => x.version)).toEqual([2, 1]);
+    expect((await version(sql!, high, r1.page.id, 1))!.body).toContain("1.234.000");
+  });
+
+  db()("an earlier personale version stays with the owner when the page is lowered", async () => {
+    const owner = `user:own-${run}`;
+    const v = await vaults().create({ kind: "cell", slug: `rls-pers-${run}`, name: "Personale", owner, defaultClassification: 4 });
+    const r1 = await pages().upsert({ vaultId: v.id, markdown: "# Diario\n\nVisita medica martedì." });
+    expect(r1.page.classification).toBe(4);
+    await pages().upsert({ vaultId: v.id, id: r1.page.id, markdown: "---\ntitle: Diario\nclassification: interno\n---\nNota condivisa." });
+
+    const me: Principal = { id: owner, vaults: [v.id], clearance: 1, personal: [v.id] };
+    expect((await versions(sql!, me, r1.page.id))!.map((x) => x.version)).toEqual([2, 1]);
+    expect((await version(sql!, me, r1.page.id, 1))!.body).toContain("Visita medica");
+
+    // an administrator (clearance 3, every vault) sees the page, not its personale history
+    const admin: Principal = { id: "user:admin", vaults: [v.id], clearance: 3 };
+    expect((await versions(sql!, admin, r1.page.id))!.map((x) => x.version)).toEqual([2]);
+    expect(await version(sql!, admin, r1.page.id, 1)).toBeUndefined();
+  });
+
+  db()("a version written without a classification by an older release gets the classification of its page", async () => {
+    const v = await newVault("rls-legacy");
+    const owner = `user:leg-${run}`;
+    const pv = await vaults().create({ kind: "cell", slug: `rls-legacy-pers-${run}`, name: "Personale", owner, defaultClassification: 4 });
+    const pi = await pages().upsert({ vaultId: v.id, markdown: "---\ntitle: Interna\nclassification: interno\n---\nTesto." });
+    const pr = await pages().upsert({ vaultId: v.id, markdown: "---\ntitle: Riservata\nclassification: riservato\n---\nTesto." });
+    const pp = await pages().upsert({ vaultId: pv.id, markdown: "# Privata\n\nTesto." });
+    // the insert of a release before 017: no classification, the page row gets updated afterwards.
+    // The trigger of 017 gives the version the classification of its page.
+    for (const p of [pi.page, pr.page, pp.page]) {
+      await sql!`insert into page_versions (page_id, version, title, body, frontmatter, hash, author)
+                 values (${p.id}, ${p.version}, ${p.title}, ${"Vecchio testo."}, ${sql!.json({})}, ${p.hash}, ${null})`;
+      await sql!`update pages set version = version + 1 where id = ${p.id}`;
+    }
+    const stored = await sql!<{ id: string; classification: number }[]>`
+      select page_id as id, classification from page_versions where page_id in ${sql!([pi.page.id, pr.page.id, pp.page.id])}`;
+    expect(Object.fromEntries(stored.map((r) => [r.id, r.classification]))).toEqual({ [pi.page.id]: 1, [pr.page.id]: 2, [pp.page.id]: 4 });
+
+    // exactly the readers of the page see the version
+    const seen = (p: Principal) =>
+      withReader(sql!, p, async (tx) => (await tx<{ id: string }[]>`select page_id as id from page_versions where page_id in ${tx([pi.page.id, pr.page.id, pp.page.id])}`).map((r) => r.id).sort());
+    const pagesSeen = (p: Principal) =>
+      withReader(sql!, p, async (tx) => (await tx<{ id: string }[]>`select id from pages where id in ${tx([pi.page.id, pr.page.id, pp.page.id])}`).map((r) => r.id).sort());
+    const readers: Principal[] = [
+      { id: "user:c1", vaults: [v.id, pv.id], clearance: 1 },
+      { id: "user:c3", vaults: [v.id, pv.id], clearance: 3 },
+      { id: owner, vaults: [v.id, pv.id], clearance: 1, personal: [pv.id] },
+    ];
+    for (const r of readers) expect(await seen(r)).toEqual(await pagesSeen(r));
+    expect(await seen(readers[0]!)).toEqual([pi.page.id]);
+    expect(await seen(readers[1]!)).toEqual([pi.page.id, pr.page.id].sort());
+    expect(await seen(readers[2]!)).toEqual([pi.page.id, pp.page.id].sort());
+  });
+
+  db()("a version written before migration 017 (no classification) follows its page, also after the page is lowered", async () => {
+    const v = await newVault("rls-null");
+    const r1 = await pages().upsert({ vaultId: v.id, markdown: "---\ntitle: Gara\nclassification: segreto\n---\nOfferta: 1.234.000 euro." });
+    const id = r1.page.id;
+    // a row as migration 017 found it: written by the owner role with the trigger and the constraint
+    // switched off, in one transaction, so that they are back however the test ends
+    await sql!.begin(async (tx) => {
+      await tx`alter table page_versions disable trigger page_versions_classification_trg`;
+      await tx`alter table page_versions drop constraint page_versions_classification_set`;
+      await tx`insert into page_versions (page_id, version, title, body, frontmatter, hash, author)
+               values (${id}, ${r1.page.version}, ${r1.page.title}, ${"Vecchio testo."}, ${tx.json({})}, ${r1.page.hash}, ${null})`;
+      await tx`alter table page_versions add constraint page_versions_classification_set check (classification is not null) not valid`;
+      await tx`alter table page_versions enable trigger page_versions_classification_trg`;
+      await tx`update pages set version = version + 1 where id = ${id}`;
+    });
+    const [stored] = await sql!<{ classification: number | null }[]>`select classification from page_versions where page_id = ${id} and version = 1`;
+    expect(stored!.classification).toBeNull();
+
+    const low: Principal = { id: "user:low", vaults: [v.id], clearance: 1 };
+    const high: Principal = { ...low, id: "user:high", clearance: 3 };
+    expect(await versions(sql!, low, id)).toBeUndefined();
+    expect((await versions(sql!, high, id))!.map((x) => x.version)).toEqual([2, 1]);
+
+    // lowered: version 2 keeps segreto, the version without a classification follows the page
+    const r3 = await pages().upsert({ vaultId: v.id, id, markdown: "---\ntitle: Gara\nclassification: interno\n---\nOfferta inviata." });
+    expect(r3.page.version).toBe(3);
+    expect((await versions(sql!, low, id))!.map((x) => x.version)).toEqual([3, 1]);
+    expect((await version(sql!, low, id, 1))!.body).toBe("Vecchio testo.");
+    expect(await version(sql!, low, id, 2)).toBeUndefined();
+    expect((await versions(sql!, high, id))!.map((x) => x.version)).toEqual([3, 2, 1]);
   });
 
   db()("search operators are leakproof, so the reader can use the GIN and trigram indexes", async () => {

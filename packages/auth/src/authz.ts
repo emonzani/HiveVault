@@ -7,7 +7,7 @@
  *                         "team:<id>" = write)
  *   API account           its grants and, when bound to a user (`user_id`), what that user may
  *                         (not the user's personal vaults); capped by its scopes (read -> read,
- *                         write/ingest -> write, projects -> write on project vaults and read
+ *                         write/ingest -> write, projects -> write on project vaults and nothing
  *                         elsewhere, admin scope -> admin API) and by the user's clearance
  *   team                  never acts: its grants reach its members
  *
@@ -74,11 +74,12 @@ const VAULT_ACTION: Partial<Record<Action, Permission>> = {
 /**
  * The highest permission an API account's scopes allow, on a project vault (owner
  * `project:<slug>`) and on any other. "projects" writes project vaults only, through the project
- * routes and the MCP inbox (`requireAction` refuses it everywhere else); elsewhere it reads at most.
+ * routes and the MCP inbox (`requireAction` refuses it everywhere else); it gives nothing on other
+ * vaults: reading them needs the scope "read".
  */
 export function apiCap(scopes: string[], projectVault: boolean): Permission | null {
   if (scopes.includes("write") || scopes.includes("ingest")) return "write";
-  if (scopes.includes("projects")) return projectVault ? "write" : "read";
+  if (scopes.includes("projects") && projectVault) return "write";
   if (scopes.includes("read")) return "read";
   return null;
 }
@@ -169,6 +170,15 @@ export class Access {
   static toReader(ctx: AccessContext, only?: string[]): { id: string; vaults: string[]; clearance: number; personal: string[] } {
     const readable = [...ctx.vaults.keys()].filter((v) => !only || only.includes(v));
     return { id: ctx.principal.id, vaults: readable, clearance: ctx.clearance, personal: ctx.personal.filter((v) => readable.includes(v)) };
+  }
+
+  /**
+   * The reader of a stored principal, for a job that works for it after the request (the
+   * attachments of an upload), or null when the principal no longer exists or acts.
+   */
+  async readerOf(principalId: string): Promise<ReturnType<typeof Access.toReader> | null> {
+    const [p] = await this.sql<PrincipalRow[]>`select ${this.sql.unsafe(PRINCIPAL_COLS)} from principals where id = ${principalId}`;
+    return p && isUsable(p) ? Access.toReader(await this.context(p)) : null;
   }
 
   /** True in the principal's own personal vault: only there it may set or change "personale". */

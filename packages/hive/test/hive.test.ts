@@ -6,7 +6,7 @@ import { PageStore, VaultStore } from "@cb/brain";
 import type { Sql } from "@cb/db";
 import { setupTestDb } from "@cb/db/testing";
 import { ulid } from "@cb/shared";
-import { Curator, mergePages, promoteSpace, setFeeds, syncClaims } from "../src/index.ts";
+import { Curator, mergePages, MergeVisibilityError, promoteSpace, setFeeds, syncClaims } from "../src/index.ts";
 
 const sql: Sql | undefined = await setupTestDb();
 const run = ulid().slice(-6).toLowerCase();
@@ -187,5 +187,34 @@ describe("merge of duplicates", () => {
     await mergePages(sql!, pages!, keep.page.id, drop.page.id);
     const [p] = await sql!<{ aliases: string[] }[]>`select frontmatter->'aliases' as aliases from pages where id = ${keep.page.id}`;
     expect([...p!.aliases].sort()).toEqual([`Orsa ${run}`, `Orsa Spa ${run}`].sort());
+  });
+
+  db()("never moves a private page into a page that is not private; a private page can keep a visible one", async () => {
+    const v = await vaults!.create({ kind: "cell", slug: `mergev-${run}`, name: "MV" });
+    const mk = (t: string, vis: string, line: string) => pages!.upsert({ vaultId: v.id, markdown: page(t, [line], vis ? `visibility: ${vis}\n` : "") });
+    const state = async (id: string) => (await sql!<{ body: string; visibility: number; version: number }[]>`select body, visibility, version from pages where id = ${id}`)[0];
+    // private page removed, visible page kept: refused before any write
+    const visible = await mk(`Lince ${run} srl`, "", "Sede: Bari");
+    const secret = await mk(`Lince ${run} S.r.l.`, "privato", "Margine: 40%");
+    for (const vis of ["azienda", "team"]) {
+      if (vis === "team") await pages!.upsert({ vaultId: v.id, id: visible.page.id, markdown: page(`Lince ${run} srl`, ["Sede: Bari"], "visibility: team\n") });
+      const before = await state(visible.page.id);
+      await expect(mergePages(sql!, pages!, visible.page.id, secret.page.id)).rejects.toBeInstanceOf(MergeVisibilityError);
+      expect(await state(visible.page.id)).toEqual(before);
+      expect(await state(secret.page.id)).toBeDefined();
+    }
+    // the other direction merges as before and the kept page stays private
+    const r = await mergePages(sql!, pages!, secret.page.id, visible.page.id);
+    expect(r).toMatchObject({ kept: secret.page.id, removed: visible.page.id });
+    expect(await state(visible.page.id)).toBeUndefined();
+    const kept = await state(secret.page.id);
+    expect(kept!.visibility).toBe(0);
+    expect(kept!.body).toContain("Sede: Bari");
+    // two private pages merge as before
+    const p2 = await mk(`Puma ${run} srl`, "privato", "Sede: Lecce");
+    const p3 = await mk(`Puma ${run} S.r.l.`, "privato", "Rinnovo: 2027");
+    await mergePages(sql!, pages!, p2.page.id, p3.page.id);
+    expect(await state(p3.page.id)).toBeUndefined();
+    expect((await state(p2.page.id))!.visibility).toBe(0);
   });
 });

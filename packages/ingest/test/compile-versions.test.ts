@@ -52,7 +52,7 @@ async function setup(slug: string, readTokens = 3000) {
   const compiler = new Compiler(sql!, store, pages, new SearchEngine(sql!, undefined, { dims: 16, embedModel: "m" }), dispatcher, { useModel: "always", readTokens });
   const vault = await new VaultStore(sql!, 16).create({ kind: "cell", slug: `${slug}-${run}`, name: slug });
   const source = async (name: string, text: string, o: { path?: string } = {}): Promise<Source> => {
-    const { source: s } = await store.create(Buffer.from(text), { vaultId: vault.id, name, origin: o.path ? "import" : "upload", ...(o.path ? { path: o.path } : {}) });
+    const { source: s } = await store.create(Buffer.from(text), { vaultId: vault.id, name, origin: o.path ? "import" : "upload", ...(o.path ? { path: o.path } : {}) }, "system");
     await store.update(s.id, { status: "parsed", level: 1 });
     await store.writeChunks(s, text, "italian", { minTokens: 1, targetTokens: 40, maxTokens: 60 });
     return (await store.get(s.id))!;

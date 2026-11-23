@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const sha256hex = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
 
@@ -75,5 +75,21 @@ export class SecretBox {
     d.setAuthTag(sealed.subarray(12, 28));
     if (aad) d.setAAD(Buffer.from(aad));
     return Buffer.concat([d.update(sealed.subarray(28)), d.final()]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Keyed hash: HMAC-SHA256 with a key derived from the master key, for short secrets that the
+// server only compares (recovery codes). A copy of the database alone cannot test a guess.
+// ---------------------------------------------------------------------------
+export class KeyedHash {
+  private readonly key: Buffer;
+
+  constructor(masterKey: Buffer, purpose: string) {
+    this.key = Buffer.from(hkdfSync("sha256", masterKey, Buffer.from("cb-auth-hmac-v1"), Buffer.from(purpose), 32));
+  }
+
+  hex(data: string): string {
+    return createHmac("sha256", this.key).update(data).digest("hex");
   }
 }

@@ -107,7 +107,10 @@ export interface Citation {
 export function extractCitations(body: string): Citation[] {
   const masked = maskCode(body);
   const out: Citation[] = [];
-  for (const m of masked.matchAll(/\^\[([^\]\n]+)\]/g)) {
+  // The closing "]" is optional and checked below: an unclosed "^[" consumes its run in one step.
+  // With a required "]", every "^[" of a long unclosed run rescans it (quadratic time).
+  for (const m of masked.matchAll(/\^\[([^\]\n]+)(\])?/g)) {
+    if (!m[2]) continue;
     const [source, chunk] = m[1]!.split("#");
     out.push({ ref: m[1]!, source: source!.trim(), chunk: chunk?.trim() ?? null, offset: m.index! });
   }
@@ -130,15 +133,27 @@ export interface Section {
   headingStart: number;
 }
 
+/**
+ * Heading text without the closing "#" sequence and the spaces around it. A loop from the
+ * end instead of a regex: a backtracking regex is superlinear on long lines of "#" or spaces.
+ */
+function headingTitle(text: string): string {
+  let end = text.trimEnd().length;
+  while (end > 0 && text[end - 1] === "#") end--;
+  return text.slice(0, end).trim();
+}
+
 export function sections(body: string): Section[] {
   const masked = maskCode(body);
   const heads: { level: number; title: string; lineStart: number; contentStart: number }[] = [];
-  const re = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/gm;
+  // The whole line after "# " in one greedy run: no adjacent quantifiers that overlap, so the
+  // match is linear in the line length. headingTitle removes the closing hashes.
+  const re = /^(#{1,6})[ \t].+$/gm;
   for (const m of masked.matchAll(re)) {
     const lineEnd = masked.indexOf("\n", m.index!);
     heads.push({
       level: m[1]!.length,
-      title: body.slice(m.index! + m[1]!.length, m.index! + m[0].length).replace(/#+\s*$/, "").trim(),
+      title: headingTitle(body.slice(m.index! + m[1]!.length, m.index! + m[0].length)),
       lineStart: m.index!,
       contentStart: lineEnd < 0 ? body.length : lineEnd + 1,
     });
@@ -200,11 +215,13 @@ export function firstParagraph(body: string, maxChars = 280): string {
     const p = para.trim();
     if (!p || /^#{1,6}\s/.test(p) || /^[-*_]{3,}$/.test(p) || /^\|/.test(p) || /^\s*$/.test(p)) continue;
     const start = masked.indexOf(para);
+    // Closing brackets are optional and checked in the callback (as in extractCitations): an
+    // unclosed "[[" or "^[" is kept as it is, and its run is not scanned again (linear time).
     const text = body
       .slice(start, start + para.length)
-      .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-      .replace(/\[\[([^\]]+)\]\]/g, "$1")
-      .replace(/\^\[[^\]]+\]/g, "")
+      .replace(/\[\[([^\]|]+)(?:\|([^\]]+)(\]\])?)?/g, (m: string, _t: string, display?: string, close?: string) => (close ? display! : m))
+      .replace(/\[\[([^\]]+)(\]\])?/g, (m: string, target: string, close?: string) => (close ? target : m))
+      .replace(/\^\[[^\]]+(\])?/g, (m: string, close?: string) => (close ? "" : m))
       .replace(/^[-*+]\s+/gm, "")
       .replace(/\s+/g, " ")
       .trim();

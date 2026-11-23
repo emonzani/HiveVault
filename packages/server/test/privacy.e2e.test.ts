@@ -42,6 +42,7 @@ const task = sql
       compiler: new Compiler(sql, store!, new PageStore(sql), search!, dispatcher, { useModel: "never" }),
       chunk: { minTokens: 1 },
       name: `ingest-privacy-${run}`,
+      readerOf: (id) => auth!.access.readerOf(id),
     })
   : undefined;
 const engine = sql ? new TaskEngine(sql, { pollMs: 50 }).register(task!) : undefined;
@@ -68,7 +69,7 @@ const app: FastifyInstance | undefined = sql
       ingest: ingest!,
       secureCookies: false,
       loginRateLimitPerMin: 10_000,
-      ops: { metrics: metricsService!, engine: engine!, pages: pages!, settings: settings!, dataDir: tmp },
+      ops: { metrics: metricsService!, engine: engine!, pages: pages!, settings: settings!, dataDir: tmp, blobs: store!.blobs },
     })
   : undefined;
 afterAll(async () => {
@@ -86,10 +87,21 @@ class Client {
   cookie = "";
   csrf = "";
   id = "";
-  call(method: string, url: string, payload?: unknown): Promise<LightMyRequestResponse> {
-    const h: Record<string, string> = { cookie: this.cookie };
+  call(method: string, url: string, payload?: unknown, headers: Record<string, string> = {}): Promise<LightMyRequestResponse> {
+    const h: Record<string, string> = { ...headers, cookie: this.cookie };
     if (method !== "GET") h["x-cb-csrf"] = this.csrf;
     return app!.inject({ method: method as "GET", url, headers: h, ...(payload !== undefined ? { payload: payload as string } : {}) });
+  }
+  /** One file with compile=true, as the upload dialog sends it. */
+  upload(vaultId: string, name: string, data: Buffer): Promise<LightMyRequestResponse> {
+    const b = "----cb" + randomBytes(6).toString("hex");
+    const body = Buffer.concat([
+      Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="compile"\r\n\r\ntrue\r\n`),
+      Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+      data,
+      Buffer.from(`\r\n--${b}--\r\n`),
+    ]);
+    return this.call("POST", `/api/vaults/${vaultId}/sources`, body as unknown as string, { "content-type": `multipart/form-data; boundary=${b}` });
   }
 }
 
@@ -144,7 +156,7 @@ describe("personale", () => {
     expect(ownHits.map((h) => h.id)).toContain(mine.json().id);
 
     // personal documents: hidden from the console, not changed, not deleted by administrators
-    const up = await ingest!.upload(v.id, Buffer.from(`Referto ${run}: tutto bene.`), `referto-${run}.txt`, owner.id, { classification: 4 });
+    const up = await ingest!.upload(v.id, Buffer.from(`Referto ${run}: tutto bene.`), `referto-${run}.txt`, owner.id, "system", { classification: 4 });
     const listed = (await admin.call("GET", `/api/admin/sources?vault=${v.id}`)).json() as { id: string }[];
     expect(listed.map((s) => s.id)).not.toContain(up.source.id);
     expect((await admin.call("PATCH", `/api/admin/sources/${up.source.id}`, { classification: 1 })).statusCode).toBe(404);
@@ -180,6 +192,45 @@ describe("personale", () => {
   });
 });
 
+describe("personale: uploads of the same bytes", () => {
+  db()("an administrator's upload of the bytes of a personal document gets no id, name or status and changes nothing", async () => {
+    const admin = await user("admin");
+    const owner = await user("member");
+    const v = await personalVault(admin, owner, "persdup");
+    const doc = Buffer.from(`Certificato medico ${run}: prognosi di dieci giorni.`);
+    const mine = await ingest!.upload(v.id, doc, `certificato-${run}.txt`, owner.id, "system", { compile: false });
+    expect(mine.source.classification).toBe(4);
+    for (let i = 0; i < 300; i++) {
+      const [t] = await sql!<{ status: string }[]>`select status from tasks where id = ${mine.taskId}`;
+      if (t?.status === "done") break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const before = await store!.get(mine.source.id);
+    expect(before).toMatchObject({ level: 2, compile: false });
+
+    const up = await admin.upload(v.id, "candidato.txt", doc);
+    expect(up.statusCode).toBe(202);
+    expect(up.json().sources).toEqual([{ name: "candidato.txt", duplicate: true }]);
+    expect(await store!.get(mine.source.id)).toEqual(before);
+    expect(await sql!`select 1 from sources where vault_id = ${v.id}`).toHaveLength(1);
+
+    // the same bytes inside an archive do not set the compile flag of the personal document either
+    const zip = new JSZip();
+    zip.file("dentro.txt", doc);
+    zip.file("altro.txt", `Altro ${run}`);
+    const z = await admin.upload(v.id, "archivio.zip", await zip.generateAsync({ type: "nodebuffer" }));
+    expect(z.statusCode).toBe(202);
+    const zipId = z.json().sources[0].id as string;
+    for (let i = 0; i < 200; i++) {
+      const [t] = await sql!<{ status: string; phase: string }[]>`select t.status, t.phase from tasks t join sources s on s.task_id = t.id where s.id = ${zipId}`;
+      if (t && (t.phase !== "parse" || t.status === "done")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect((await sql!<{ name: string }[]>`select name from sources where parent_id = ${zipId}`).map((c) => c.name)).toEqual(["altro.txt"]);
+    expect(await store!.get(mine.source.id)).toEqual(before);
+  });
+});
+
 describe("teams and account deletion", () => {
   db()("team grants reach members; a deleted user's personal content goes, the rest passes to the team", async () => {
     const admin = await user("admin");
@@ -205,8 +256,8 @@ describe("teams and account deletion", () => {
     const v = await personalVault(admin, leaving, "via");
     const priv = (await leaving.call("POST", `/api/vaults/${v.id}/pages`, { title: `Privato ${run}`, classification: 4 })).json();
     const work = (await leaving.call("POST", `/api/vaults/${v.id}/pages`, { title: `Lavoro ${run}`, classification: 1 })).json();
-    const doc = await ingest!.upload(v.id, Buffer.from(`Busta paga ${run}`), `busta-${run}.txt`, leaving.id, { classification: 4 });
-    const blob = path.join(tmp, "blobs", v.id, doc.source.sha256.slice(0, 2), doc.source.sha256.slice(2, 4), doc.source.sha256);
+    const doc = await ingest!.upload(v.id, Buffer.from(`Busta paga ${run}`), `busta-${run}.txt`, leaving.id, "system", { classification: 4 });
+    expect(await store!.blobs.has(v.id, doc.source.sha256)).toBe(true);
 
     // no team: the administrator must choose one; two teams: the same
     expect((await admin.call("DELETE", `/api/admin/principals/${leaving.id}`)).statusCode).toBe(409);
@@ -219,7 +270,7 @@ describe("teams and account deletion", () => {
     expect(del.json()).toMatchObject({ team: { id: t1.id }, vaults: [{ vault: v.id, action: "transferred", personal: { pages: 1, sources: 1 } }] });
     expect(await sql!`select 1 from pages where id = ${priv.id}`).toHaveLength(0);
     expect(await sql!`select 1 from sources where id = ${doc.source.id}`).toHaveLength(0);
-    await expect(import("node:fs/promises").then((f) => f.stat(blob))).rejects.toThrow();
+    expect(await store!.blobs.has(v.id, doc.source.sha256)).toBe(false);
     expect(await sql!`select 1 from pages where id = ${work.id}`).toHaveLength(1);
     // the default "personale" of the vault becomes "riservato" with the team
     expect((await sql!<{ owner: string; dc: number }[]>`select owner, default_classification as dc from vaults where id = ${v.id}`)[0]).toEqual({ owner: `team:${t1.id}`, dc: 2 });

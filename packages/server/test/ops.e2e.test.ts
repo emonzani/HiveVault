@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import JSZip from "jszip";
 import { AuthService, base32Decode, totp } from "@cb/auth";
+import { FsBlobStore } from "@cb/blobs";
 import { PageStore, SearchEngine, VaultStore } from "@cb/brain";
 import type { Sql } from "@cb/db";
 import { setupTestDb } from "@cb/db/testing";
@@ -24,6 +25,7 @@ const DIMS = 16;
 const sql: Sql | undefined = await setupTestDb();
 const run = ulid().slice(-6).toLowerCase();
 const dataDir = mkdtempSync(path.join(os.tmpdir(), "cb-ops-"));
+const blobs = new FsBlobStore(path.join(dataDir, "blobs"), randomBytes(32));
 const dispatcher = new ModelDispatcher({ expected: { embed: { model: MOCK_EMBED_MODEL, dimensions: DIMS } } });
 await dispatcher.addEndpoint(new MockEndpoint({ kind: "embed", dimensions: DIMS }));
 // a remote endpoint "of .env" on a private address that does not answer (it stays down)
@@ -56,7 +58,7 @@ const app: FastifyInstance | undefined = sql
       search: new SearchEngine(sql, dispatcher, { dims: DIMS, embedModel: MOCK_EMBED_MODEL }),
       secureCookies: false,
       loginRateLimitPerMin: 10_000,
-      ops: { metrics: metricsService!, engine: engine!, pages: pages!, models: new ModelsAdmin(runtime, settings!, null, undefined, envCfg), settings: settings!, dataDir, metricsToken: TOKEN },
+      ops: { metrics: metricsService!, engine: engine!, pages: pages!, models: new ModelsAdmin(runtime, settings!, null, undefined, envCfg), settings: settings!, dataDir, blobs, metricsToken: TOKEN },
     })
   : undefined;
 afterAll(async () => {
@@ -205,8 +207,9 @@ describe("ops API", () => {
     const v = await vaults!.create({ kind: "cell", slug: `os-${run}`, name: "S" });
     const parent = ulid();
     const child = ulid();
+    const stored = await blobs.put(v.id, `allegato ${run}`);
     await sql!`insert into sources (id, vault_id, sha256, name, mime, size, status) values (${parent}, ${v.id}, ${"a".repeat(64)}, 'p.zip', 'application/zip', 10, 'ready')`;
-    await sql!`insert into sources (id, vault_id, sha256, name, mime, size, status, parent_id) values (${child}, ${v.id}, ${"b".repeat(64)}, 'c.txt', 'text/plain', 5, 'ready', ${parent})`;
+    await sql!`insert into sources (id, vault_id, sha256, name, mime, size, status, parent_id) values (${child}, ${v.id}, ${stored.sha256}, 'c.txt', 'text/plain', 5, 'ready', ${parent})`;
     const list = (await admin.call("GET", `/api/admin/sources?vault=${v.slug}`)).json();
     expect(list.find((s: { id: string }) => s.id === parent).children).toBe(1);
 
@@ -256,7 +259,8 @@ describe("ops API", () => {
     expect(byUser).toEqual([expect.objectContaining({ vaultId: v.id, permission: "read", principalName: "Owner", vaultName: v.name, vaultKind: "cell" })]);
     expect((await admin.call("GET", `/api/admin/grants?vaultId=${v.id}`)).json().map((g: { principalId: string }) => g.principalId)).toEqual([owner.id]);
     const del = await admin.call("DELETE", `/api/admin/sources/${parent}`);
-    expect(del.json()).toMatchObject({ deleted: 2 });
+    expect(del.json()).toEqual({ deleted: 2, blobs: 2 }); // every unreferenced hash counts, stored or not
+    expect(await blobs.has(v.id, stored.sha256)).toBe(false);
     expect(await sql!`select 1 from sources where vault_id = ${v.id}`).toHaveLength(0);
 
     await pages!.upsert({ vaultId: v.id, markdown: `---\ntitle: Pagina ${run}\n---\nTesto da salvare.` });
@@ -343,5 +347,22 @@ describe("ops API", () => {
     expect((await admin.call("POST", `/api/admin/checkpoints/${manual.json().id}/restore`)).statusCode).toBe(404);
     const [audit] = await sql!`select data from audit_log where action = 'admin.checkpoint.restore' and resource = ${done.json().checkpoint}`;
     expect(audit!.data).toMatchObject({ restored: 8 });
+  });
+
+  db()("pages: a merge never moves a private page into a visible one", async () => {
+    const admin = await user("admin");
+    const v = await vaults!.create({ kind: "cell", slug: `opm-${run}`, name: "PM" });
+    const mk = (t: string, extra = "") => pages!.upsert({ vaultId: v.id, markdown: `---\ntitle: ${t}\ntype: entity/company\n${extra}---\n# ${t}\n\nTesto di ${t}.` });
+    const visible = await mk(`Rho ${run}`);
+    const secret = await mk(`Rho ${run} Srl`, "visibility: privato\n");
+    const refused = await admin.call("POST", "/api/admin/pages/merge", { keep: visible.page.id, drop: secret.page.id });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.message).toContain("privata");
+    expect((await sql!`select id from pages where id = any(${[visible.page.id, secret.page.id]})`).length).toBe(2);
+    // keeping the private page merges, and the page stays private
+    const ok = await admin.call("POST", "/api/admin/pages/merge", { keep: secret.page.id, drop: visible.page.id });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ kept: secret.page.id, removed: visible.page.id });
+    expect((await sql!<{ visibility: number }[]>`select visibility from pages where id = ${secret.page.id}`)[0]!.visibility).toBe(0);
   });
 });

@@ -15,12 +15,13 @@
   import { t, tHtml } from "../lib/i18n.ts";
   import { tablist } from "../lib/tablist.ts";
 
+  /** A document sent; only `name` for the same content as a document the user may not read. */
   interface Sent {
-    id: string;
+    id?: string;
     name: string;
-    size: number;
-    created: boolean;
-    status: string;
+    size?: number;
+    created?: boolean;
+    status?: string;
   }
 
   let dialog: HTMLDialogElement | undefined = $state();
@@ -78,7 +79,7 @@
   async function afterSend(list: Sent[]) {
     if (!compile) return;
     const fresh = list.filter((s) => s.created);
-    for (const s of fresh) sourceEvents.watch(s.id, s.name);
+    for (const s of fresh) if (s.id) sourceEvents.watch(s.id, s.name);
     if (!fresh.length) return;
     try {
       wait = waitLabel(await api.get<CompileQueue>("/api/sources/queue"));
@@ -93,7 +94,7 @@
     if (mode === "link") {
       try {
         progress = { loaded: 0, total: 0 };
-        const r = await api.post<{ id: string; created: boolean; status: string; url: string }>(`/api/vaults/${encodeURIComponent(vaultId)}/links`, {
+        const r = await api.post<{ id?: string; created?: boolean; status?: string; url: string }>(`/api/vaults/${encodeURIComponent(vaultId)}/links`, {
           url: url.trim(),
           compile,
           ...(classification !== "default" ? { classification: Number(classification) } : {}),
@@ -131,7 +132,7 @@
     ui.upload = null;
   }
 
-  const statusOf = (s: Sent) => sourceEvents.status[s.id]?.status ?? s.status;
+  const statusOf = (s: Sent) => (s.id ? sourceEvents.status[s.id]?.status : undefined) ?? s.status ?? "";
 </script>
 
 <dialog class="modal" bind:this={dialog} onclose={() => (ui.upload = null)} oncancel={(e) => (e.preventDefault(), close())} aria-labelledby="up-title">
@@ -143,7 +144,7 @@
     <div class="modal-body">
       {#if sent}
         <ul class="sent">
-          {#each sent as s (s.id)}
+          {#each sent as s, i (s.id ?? i)}
             {@const st = SOURCE_STATUS[statusOf(s)] ?? { label: statusOf(s), tone: "dim" }}
             <li>
               <span class="dot {['stored', 'parsed'].includes(statusOf(s)) ? 'busy' : st.tone}"></span>

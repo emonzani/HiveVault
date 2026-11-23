@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import QRCode from "qrcode";
-import { SCOPES, signLogin, verifyAuditChain, type Scope } from "@cb/auth";
+import { SCOPES, signatureOrigin, signLogin, verifyAuditChain, type Scope } from "@cb/auth";
 import { startDream } from "@cb/hive";
 import { loadServerConfig } from "./config.ts";
 import { createServices } from "./services.ts";
@@ -114,16 +114,22 @@ try {
     const keyFile = flag("key");
     if (!user || !keyFile) usage();
     const url = (flag("url") ?? cfg.publicUrl).replace(/\/+$/, "");
+    // the signature names the server this command talks to (--url or PUBLIC_URL), never a value the server sends
+    const origin = signatureOrigin(url);
     const ch = (await (await fetch(`${url}/api/auth/challenge?username=${encodeURIComponent(user)}`)).json()) as { challengeId: string; nonce: string };
-    const signed = signLogin(readFileSync(keyFile, "utf8"), user, ch.nonce);
+    const signed = signLogin(readFileSync(keyFile, "utf8"), origin, user, ch.nonce);
     const res = await fetch(`${url}/api/auth/challenge`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username: user, challengeId: ch.challengeId, ...signed }),
+      body: JSON.stringify({ username: user, challengeId: ch.challengeId, origin, ...signed }),
     });
-    const body = (await res.json()) as { token?: string; csrf?: string; expiresAt?: string; error?: { message: string } };
+    const body = (await res.json()) as { token?: string; csrf?: string; expiresAt?: string; error?: { code?: string; message: string } };
     if (!res.ok) {
-      console.error(body.error?.message ?? `Accesso non riuscito (HTTP ${res.status}).`);
+      console.error(
+        body.error?.code === "origin_mismatch"
+          ? `Il server non accetta firme per ${origin}. Usa --url con l'indirizzo pubblico del server (PUBLIC_URL).`
+          : (body.error?.message ?? `Accesso non riuscito (HTTP ${res.status}).`),
+      );
       process.exit(1);
     }
     console.log(`Accesso eseguito. Sessione valida fino a ${new Date(body.expiresAt!).toLocaleString("it-IT")}.`);

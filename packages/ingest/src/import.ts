@@ -10,8 +10,8 @@
  * Safety: the root must be inside one of the allowed import roots (IMPORT_ROOTS), resolved
  * through symlinks — an admin cannot import arbitrary server files (the master key!).
  */
-import { createReadStream } from "node:fs";
-import { opendir, realpath, stat } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, opendir, readlink, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type { Sql } from "@cb/db";
 import { createLogger, newId } from "@cb/shared";
@@ -93,6 +93,87 @@ function nextWindowStart(w: string, now = new Date()): Date {
   d.setHours(Number(m[1]), Number(m[2]), 0, 0);
   if (d <= now) d.setDate(d.getDate() + 1);
   return d;
+}
+
+/** Paths compared as the default file system of the platform does: without case on Windows and macOS. */
+function norm(p: string): string {
+  return process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p;
+}
+
+/** `p` is inside the folder `dir`. */
+function inside(p: string, dir: string): boolean {
+  return norm(p).startsWith(norm(dir.endsWith(path.sep) ? dir : dir + path.sep));
+}
+
+function sameFile(a: BigIntStats, b: BigIntStats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/** Path of an open file or folder as the kernel names it (Linux /proc); undefined without /proc. */
+async function procPath(fh: FileHandle): Promise<string | undefined> {
+  if (process.platform !== "linux") return undefined;
+  return readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
+}
+
+/**
+ * Linux: the folders above the open folder `dir` have the names of the components of `root`.
+ * Every lookup starts from `dir` through /proc, so a folder of the path that was a symlink while
+ * `dir` was opened fails the check even if it is a folder again when the check runs.
+ */
+async function reachedThrough(dir: FileHandle, st: BigIntStats, root: string): Promise<boolean> {
+  let up = `/proc/self/fd/${dir.fd}`;
+  let cur = st;
+  for (const name of root.split("/").filter(Boolean).reverse()) {
+    if (!sameFile(await lstat(`${up}/../${name}`, { bigint: true }), cur)) return false;
+    up += "/..";
+    cur = await stat(up, { bigint: true });
+  }
+  return sameFile(cur, await stat("/", { bigint: true }));
+}
+
+/**
+ * Opens a scanned file for the store phase. The share can change after the scan: the file, a
+ * folder on its path or a folder above the root can become a symlink to a file outside the
+ * import (the server's .env, another share).
+ *
+ * The root is opened as a folder and must be the stored root, reached without a symlink. The
+ * file is opened without following a final symlink and without waiting on a FIFO, and must be a
+ * regular file inside the root. On Linux both paths are the kernel's names of the open handles
+ * (/proc), so the letter case of the stored root does not matter. Elsewhere both are real paths,
+ * compared without case on Windows and macOS.
+ */
+export async function openImportFile(root: string, relPath: string): Promise<FileHandle> {
+  // Windows has no O_DIRECTORY / O_NOFOLLOW / O_NONBLOCK: there the path checks below refuse a symlink that leads out of the root
+  const dir = await open(root, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const ds = await dir.stat({ bigint: true });
+    const realRoot = await realpath(root);
+    const proc = (await procPath(dir)) !== undefined;
+    const isRoot =
+      ds.isDirectory() && norm(realRoot) === norm(root) && sameFile(await stat(root, { bigint: true }), ds) && (!proc || (await reachedThrough(dir, ds, root)));
+    if (!isRoot) throw new Error("the import folder changed after the import was created");
+    const abs = path.join(root, relPath);
+    const fh = await open(abs, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const st = await fh.stat({ bigint: true });
+      if (!st.isFile()) throw new Error("not a regular file");
+      const [file, folder] = proc ? [await procPath(fh), await procPath(dir)] : [await realPathOf(abs, st), realRoot];
+      if (file === undefined || folder === undefined || !inside(file, folder)) throw new Error("the file is outside the import folder");
+      return fh;
+    } catch (e) {
+      await fh.close();
+      throw e;
+    }
+  } finally {
+    await dir.close();
+  }
+}
+
+/** Real path of `abs`, if it is still the open file with stats `st`. */
+async function realPathOf(abs: string, st: BigIntStats): Promise<string> {
+  const real = await realpath(abs);
+  if (!sameFile(await lstat(real, { bigint: true }), st)) throw new Error("the file changed while it was opened");
+  return real;
 }
 
 export interface ImportDeps {
@@ -214,9 +295,11 @@ export function defineImportTask(d: ImportDeps): ImportTask {
         let next = 0;
         const one = async (f: { rel_path: string }) => {
           c.signal.throwIfAborted();
-          const abs = path.join(j.root, f.rel_path);
+          let fh: FileHandle | undefined;
           try {
-            const { source, created } = await d.store.create(createReadStream(abs), {
+            fh = await openImportFile(j.root, f.rel_path);
+            // a job of an administrator on the server folders (IMPORT_ROOTS): it sees every source
+            const { source, created } = await d.store.create(fh.createReadStream({ autoClose: false }), {
               vaultId: j.vaultId,
               name: path.basename(f.rel_path),
               origin: "import",
@@ -226,7 +309,7 @@ export function defineImportTask(d: ImportDeps): ImportTask {
               compile: j.compile,
               createdBy: j.createdBy,
               meta: { importJob: j.id },
-            });
+            }, "system");
             if (created) {
               const t = await submitTask(sql, d.ingestTask, { sourceId: source.id }, { requestId: `ingest:${source.id}:${source.sha256}`, priority: 2 });
               await sql`update sources set task_id = ${t.id} where id = ${source.id} and task_id is null`;
@@ -237,6 +320,8 @@ export function defineImportTask(d: ImportDeps): ImportTask {
           } catch (e) {
             errors++;
             await sql`update import_files set status = 'error', reason = ${String((e as Error).message ?? e).slice(0, 300)} where job_id = ${j.id} and rel_path = ${f.rel_path}`;
+          } finally {
+            await fh?.close();
           }
           if (j.filesPerSec) {
             const wait = (stored + errors) * (1000 / j.filesPerSec) - (Date.now() - t0);

@@ -87,7 +87,7 @@ for (const v of await sql<{ id: string }[]>`select id from vaults where slug lik
 const vault = await s.vaults.create({ kind: "cell", slug: `cbench-${run}`, name: `Compile bench ${run}`, defaultClassification: 1 });
 const sourceOfPath = new Map<string, string>();
 for (const rel of picked) {
-  const r = await s.ingest.upload(vault.id, await readFile(path.join(CORPUS, "docs", rel)), rel, null, { compile: false });
+  const r = await s.ingest.upload(vault.id, await readFile(path.join(CORPUS, "docs", rel)), rel, null, "system", { compile: false });
   sourceOfPath.set(rel, r.source.id);
 }
 log(`caricati ${picked.length} documenti nel vault ${vault.slug}`);

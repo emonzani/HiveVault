@@ -31,6 +31,8 @@ export interface Services {
   egress: EgressGuard;
   curator: Curator;
   pages: PageStore;
+  /** The raw store (L0); the server renames the older blob names after it starts (`migrateNames`). */
+  blobs: FsBlobStore;
   dream: DreamTask;
   settings: Settings;
   metrics: MetricsService;
@@ -81,11 +83,14 @@ export async function createServices(cfg: ServerConfig, o: { models?: boolean; w
     session: { idleMs: cfg.sessionIdleMs, maxMs: cfg.sessionMaxMs },
     clientCaPems: cfg.clientCaFile ? [readFileSync(cfg.clientCaFile, "utf8")] : [],
   });
+  // recovery codes stored as plain SHA-256 by earlier versions get the keyed hash (they stay valid)
+  await auth.totp.upgradeRecoveryCodes();
   const dims = modelsCfg.embed.dimensions;
   const vaults = new VaultStore(sql, dims);
   const search = new SearchEngine(sql, models.dispatcher, { dims, embedModel: modelsCfg.embed.modelId });
 
-  const store = new SourceStore(workerSql, new FsBlobStore(path.join(cfg.dataDir, "blobs"), masterKey));
+  const blobs = new FsBlobStore(path.join(cfg.dataDir, "blobs"), masterKey);
+  const store = new SourceStore(workerSql, blobs);
   const pool = new ParserPool({ threads: cfg.parserThreads });
   const compiler = new Compiler(workerSql, store, new PageStore(workerSql), search, models.dispatcher, { mode: cfg.compileMode });
   const embedConfigured = modelsCfg.offlineMode === "mock" || modelsCfg.local.enabled || modelsCfg.embed.remoteUrls.length > 0;
@@ -95,6 +100,7 @@ export async function createServices(cfg: ServerConfig, o: { models?: boolean; w
     indexer: () => (embedConfigured ? new EmbeddingIndexer(workerSql, models.dispatcher, { model: modelsCfg.embed.modelId }) : null),
     compiler,
     email: () => settings.get("privacy").emailIngest,
+    readerOf: (id) => auth!.access.readerOf(id),
     // extraction runs on the pool "extract" when one is up (M4); the agent always on the main model
     chatBusy: () => models.dispatcher.busy("chat", cfg.compileMode === "extract" ? EXTRACT_POOL : undefined),
     ocr: () => {
@@ -168,6 +174,7 @@ export async function createServices(cfg: ServerConfig, o: { models?: boolean; w
     engine,
     egress,
     pages,
+    blobs,
     dream: dreamTask,
     curator: new Curator(workerSql, pages),
     settings,

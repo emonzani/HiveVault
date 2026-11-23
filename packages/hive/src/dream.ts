@@ -28,6 +28,7 @@ import {
   linkTargets,
   lintVault,
   mergePages,
+  MergeVisibilityError,
   pickKeeper,
   updateImportance,
   vacuumVault,
@@ -279,10 +280,17 @@ export const STEPS: Step[] = [
         }
         if (same && confidence >= 0.9) {
           const [keep, drop] = await pickKeeper(deps.sql, p.a.id, p.b.id);
-          await mergePages(deps.sql, deps.pages, keep, drop);
-          gone.add(drop);
-          merged++;
-        } else if (p.similarity >= 0.7 || same) {
+          try {
+            await mergePages(deps.sql, deps.pages, keep, drop);
+            gone.add(drop);
+            merged++;
+            continue;
+          } catch (e) {
+            // the page to remove is private and the kept one is not: a curator decides (queued below)
+            if (!(e instanceof MergeVisibilityError)) throw e;
+          }
+        }
+        if (p.similarity >= 0.7 || same) {
           await upsertCuratorItem(deps.sql, vaultId, "duplicate", claimHash(`dup|${[p.a.id, p.b.id].sort().join("|")}`), p.a.title, null, {
             a: p.a,
             b: p.b,

@@ -46,6 +46,25 @@ Se la persona è in un solo team, il team è già scelto. Se è in più team o i
 
 **Console → Team** crea i team e gestisce i membri. Un utente può stare in più team. Per dare un permesso a un team, apri **Modifica i permessi** dal team. Un team non accede al server e non ha chiavi. Un team che possiede celle non si elimina: assegna prima le celle a un altro proprietario.
 
+### Accesso con firma (riga di comando e dispositivi edge)
+
+Uno script o un dispositivo edge accede con una chiave privata: Ed25519, ECDSA P-256 o un certificato della CA aziendale. Registra la chiave pubblica dell'utente sul server (`POST /api/admin/principals/<id>/public-keys`). La console mostra le chiavi in **Chiavi di firma**.
+
+Il client firma il messaggio `cb-auth-v2|<origine>|<utente>|<nonce>|<ts>`. L'origine è lo schema, il nome e la porta dell'indirizzo del server, per esempio `https://brain.azienda.local`. Il client prende l'indirizzo dalla sua configurazione, mai dal server. Il server accetta solo l'origine di `PUBLIC_URL` e le origini in `WEBAUTHN_EXTRA_ORIGINS`. Così una firma vale solo per il server che il client vuole raggiungere.
+
+Dalla riga di comando, usa l'indirizzo pubblico del server:
+
+```bash
+npm run cb -- login --user <utente> --key <chiave-privata.pem> --url https://brain.azienda.local
+```
+
+| Errore | Causa | Cosa fare |
+|---|---|---|
+| `signature_outdated` | Il client firma il messaggio vecchio `cb-auth-v1` | Aggiorna il client |
+| `origin_mismatch` | Il client firma un indirizzo che il server non accetta | Usa `--url` con l'indirizzo di `PUBLIC_URL` |
+
+Con questi due errori il server non apre una sessione e non conta un tentativo fallito per il blocco dell'utente. Il log di audit li registra come `login.signature.outdated` e `login.signature.origin`, con la chiave usata.
+
 ## 3. Account API e agente cloud
 
 **Console → Account API → Nuovo account API**

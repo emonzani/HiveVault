@@ -138,8 +138,15 @@ describe("login methods over HTTP", () => {
     expect(added.statusCode).toBe(201);
     const c = new Client();
     const ch = (await c.call("GET", `/api/auth/challenge?username=edge-${run}`)).json();
-    const signed = signLogin(kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string, `edge-${run}`, ch.nonce);
-    const login = await c.call("POST", "/api/auth/challenge", { username: `edge-${run}`, challengeId: ch.challengeId, ...signed });
+    expect(ch.format).toMatch(/^cb-auth-v2\|<origin/);
+    const priv = kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    // a signature for another server (a relay) does not log in; the origin it names explains why
+    const relayed = await c.call("POST", "/api/auth/challenge", { username: `edge-${run}`, challengeId: ch.challengeId, origin: "https://relay.example", ...signLogin(priv, "https://relay.example", `edge-${run}`, ch.nonce) });
+    expect(relayed.statusCode).toBe(401);
+    expect(relayed.json().error.code).toBe("origin_mismatch");
+    const ch2 = (await c.call("GET", `/api/auth/challenge?username=edge-${run}`)).json();
+    const signed = signLogin(priv, ORIGIN, `edge-${run}`, ch2.nonce);
+    const login = await c.call("POST", "/api/auth/challenge", { username: `edge-${run}`, challengeId: ch2.challengeId, origin: ORIGIN, ...signed });
     expect(login.statusCode).toBe(200);
     expect(login.json().token).toHaveLength(43); // for clients without a cookie jar (CLI, edge)
     expect((await c.call("GET", "/api/auth/me")).json().principal.id).toBe(id);

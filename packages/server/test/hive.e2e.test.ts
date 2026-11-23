@@ -120,6 +120,20 @@ describe("hive API", () => {
     const [link] = await sql!<{ dst: string }[]>`select dst_page as dst from links where src_page = ${z.page.id}`;
     expect(link!.dst).toBe(x.page.id);
 
+    // a private page is never merged into a visible one: 400, the item stays open; keeping the private page merges
+    const pv = await pages!.upsert({ vaultId: space.id, markdown: md(`Sigma ${run}`, ["Sede: Bari"]) });
+    const ps = await pages!.upsert({ vaultId: space.id, markdown: md(`Sigma ${run} Srl`, ["Margine: 40%"]).replace("---\n#", "visibility: privato\n---\n#") });
+    const dupP = await upsertCuratorItem(sql!, space.id, "duplicate", `dupp-${run}`, `Sigma ${run}`, null, { a: { id: pv.page.id, title: pv.page.title }, b: { id: ps.page.id, title: ps.page.title } });
+    const refused = await cur.call("POST", `/api/curator/${dupP.id}/merge`, { keep: pv.page.id });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.message).toContain("privata");
+    expect((await sql!<{ status: string }[]>`select status from curator_items where id = ${dupP.id}`)[0]!.status).toBe("open");
+    expect((await sql!`select id from pages where id = any(${[pv.page.id, ps.page.id]})`).length).toBe(2);
+    const keptPrivate = await cur.call("POST", `/api/curator/${dupP.id}/merge`, { keep: ps.page.id });
+    expect(keptPrivate.statusCode).toBe(200);
+    expect(keptPrivate.json()).toMatchObject({ kept: ps.page.id, removed: pv.page.id });
+    expect((await sql!<{ visibility: number }[]>`select visibility from pages where id = ${ps.page.id}`)[0]!.visibility).toBe(0);
+
     // reports and indexes: readers only
     expect((await reader.call("GET", `/api/vaults/${c1.id}/index/llms`)).statusCode).toBe(403);
     const llms = await admin.call("GET", `/api/vaults/${c1.id}/index/llms`);

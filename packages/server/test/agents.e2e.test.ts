@@ -26,7 +26,7 @@ const pages = sql ? new PageStore(sql, { minTokens: 1 }) : undefined;
 // ingestion stand-in: records the uploads the way IngestService.upload answers
 const uploads: { vaultId: string; name: string; text: string; classification?: number; compile?: boolean }[] = [];
 const ingest = {
-  async upload(vaultId: string, data: Buffer, name: string, _by: string | null, o: { classification?: number; compile?: boolean } = {}) {
+  async upload(vaultId: string, data: Buffer, name: string, _by: string | null, _reader: unknown, o: { classification?: number; compile?: boolean } = {}) {
     uploads.push({ vaultId, name, text: data.toString("utf8"), ...o });
     return { source: { id: `src_test${uploads.length}`, name }, created: true, taskId: `tsk_${uploads.length}` };
   },

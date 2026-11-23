@@ -325,12 +325,13 @@ test("schede e link salvati prima di una rinomina aprono la vista nuova", async 
   // no version knows: the first opens "Cosa ha letto l'agente cloud", the second is dropped
   await page.goto("/");
   await ready(page);
-  await page.evaluate(() =>
+  await page.evaluate((key) =>
     localStorage.setItem(
-      "cb-workspace",
+      key,
       // the active tab takes the view of the URL on load: the saved views sit in the other tabs
       JSON.stringify([{ active: 2, tabs: [{ id: "old1", view: { kind: "claude" }, title: "Cosa ha letto Claude" }, { id: "old2", view: { kind: "sparita" }, title: "?" }, { id: "old3", view: { kind: "home" }, title: "" }] }]),
     ),
+    `cb-workspace-${seed.main.id}`,
   );
   await page.reload();
   await ready(page);

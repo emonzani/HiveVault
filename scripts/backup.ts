@@ -15,8 +15,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 
 const [cmd = "info"] = process.argv.slice(2);
-const sh = (args: string[], o: { input?: string; quiet?: boolean } = {}) => {
-  const r = spawnSync("docker", args, { encoding: "utf8", input: o.input, maxBuffer: 64 * 1024 * 1024 });
+const sh = (args: string[], o: { input?: string; quiet?: boolean; env?: NodeJS.ProcessEnv } = {}) => {
+  const r = spawnSync("docker", args, { encoding: "utf8", input: o.input, env: o.env, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`docker ${args.slice(0, 4).join(" ")}… non riuscito:\n${(r.stderr || r.stdout).trim().slice(-2000)}`);
   if (!o.quiet) process.stdout.write(r.stdout);
   return r.stdout;
@@ -48,17 +48,19 @@ async function verify(): Promise<void> {
   const project = sh(["compose", "config", "--format", "json"], { quiet: true });
   const repoVolume = (JSON.parse(project) as { name: string }).name + "_pgbackrest";
   const pass = sh(["compose", "exec", "-T", "postgres", "printenv", "PGBACKREST_REPO1_CIPHER_PASS"], { quiet: true }).trim();
+  // `-e NAME` without a value: docker reads the passphrase from its own environment, never from its argv
+  const passEnv = { ...process.env, PGBACKREST_REPO1_CIPHER_PASS: pass };
   try {
     sh(["volume", "create", vol], { quiet: true });
-    const restoreArgs = ["run", "--rm", "-u", "postgres", "-e", `PGBACKREST_REPO1_CIPHER_PASS=${pass}`, "-v", `${repoVolume}:/var/lib/pgbackrest`, "-v", `${vol}:/var/lib/postgresql/data`, "hivevault/postgres:17"];
+    const restoreArgs = ["run", "--rm", "-u", "postgres", "-e", "PGBACKREST_REPO1_CIPHER_PASS", "-v", `${repoVolume}:/var/lib/pgbackrest`, "-v", `${vol}:/var/lib/postgresql/data`, "hivevault/postgres:17"];
     const tr = Date.now();
-    sh([...restoreArgs, "pgbackrest", "--stanza=brain", "--type=time", `--target=${target}`, "--target-action=promote", "--archive-mode=off", "restore"], { quiet: true });
+    sh([...restoreArgs, "pgbackrest", "--stanza=brain", "--type=time", `--target=${target}`, "--target-action=promote", "--archive-mode=off", "restore"], { quiet: true, env: passEnv });
     const restoreS = (Date.now() - tr) / 1000;
     // Recovery refuses settings lower than the primary's: copy them (a real restore needs the same)
     const MUST_MATCH = ["max_connections", "max_locks_per_transaction", "max_prepared_transactions", "max_worker_processes", "max_wal_senders"];
     const settings = psql(`select string_agg(name || '=' || setting, ' ') from pg_settings where name = any('{${MUST_MATCH.join(",")}}')`).split(" ").flatMap((x) => ["-c", x]);
     // recovery replays WAL with `pgbackrest archive-get`: it needs the repository and its passphrase
-    sh(["run", "-d", "--name", name, "-u", "postgres", "-e", `PGBACKREST_REPO1_CIPHER_PASS=${pass}`, "-v", `${repoVolume}:/var/lib/pgbackrest:ro`, "-v", `${vol}:/var/lib/postgresql/data`, "hivevault/postgres:17", "postgres", "-c", "archive_mode=off", "-c", "shared_buffers=1GB", ...settings], { quiet: true });
+    sh(["run", "-d", "--name", name, "-u", "postgres", "-e", "PGBACKREST_REPO1_CIPHER_PASS", "-v", `${repoVolume}:/var/lib/pgbackrest:ro`, "-v", `${vol}:/var/lib/postgresql/data`, "hivevault/postgres:17", "postgres", "-c", "archive_mode=off", "-c", "shared_buffers=1GB", ...settings], { quiet: true, env: passEnv });
     // wait for recovery to finish and the server to accept connections
     const q = (sql: string) => sh(["exec", name, "psql", "-U", "brain", "-d", "brain", "-AtX", "-c", sql], { quiet: true }).trim();
     let ready = false;

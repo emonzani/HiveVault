@@ -156,10 +156,11 @@ export class PageStore {
 
       let rows: Page[];
       if (existing) {
+        // the version keeps the classification it had: lowering the page does not lower its history
         await tx`
-          insert into page_versions (page_id, version, title, body, frontmatter, hash, author)
+          insert into page_versions (page_id, version, title, body, frontmatter, hash, author, classification)
           values (${existing.id}, ${existing.version}, ${existing.title}, ${existing.body}, ${tx.json(existing.frontmatter as never)},
-                  ${existing.hash}, ${input.author ?? null})
+                  ${existing.hash}, ${input.author ?? null}, ${existing.classification})
           on conflict do nothing`;
         rows = await tx<Page[]>`
           update pages set path = ${path}, title = ${title}, type = ${type}, tldr = ${tldr}, body = ${body},

@@ -2,8 +2,13 @@
  * Challenge login (plan §8.1): the client proves it holds the private key of the user.
  *
  *   1. GET  /auth/challenge?username=…   -> { challengeId, nonce, expiresAt }
- *   2. the client signs   "cb-auth-v1|<username>|<nonce>|<ts>"   (ts = Unix seconds)
- *   3. POST /auth/challenge               { username, challengeId, ts, signature }
+ *   2. the client signs   "cb-auth-v2|<origin>|<username>|<nonce>|<ts>"   (ts = Unix seconds)
+ *   3. POST /auth/challenge               { username, challengeId, ts, signature, origin? }
+ *
+ * <origin> is the origin (scheme://host[:port]) of the server URL the client talks to, from the
+ * client's own settings, never from the server. The server accepts only its own origins
+ * (PUBLIC_URL, WEBAUTHN_EXTRA_ORIGINS): a signature made for another server, which relayed
+ * this server's challenge, does not log in here.
  *
  * Keys: Ed25519, ECDSA P-256, or an X.509 certificate (Ed25519/P-256 key) issued by the
  * company CA. The nonce is single-use and lives 60 s; ts must be within ±60 s. An unknown
@@ -15,17 +20,27 @@ import { newId } from "@cb/shared";
 import { randomToken, sha256hex } from "./crypto.ts";
 import { AuthError } from "./errors.ts";
 
-export const SIGNATURE_PREFIX = "cb-auth-v1";
+export const SIGNATURE_PREFIX = "cb-auth-v2";
+/** Message of older clients, without the origin: recognized only to tell them to update. */
+const LEGACY_PREFIX = "cb-auth-v1";
 const CHALLENGE_TTL_MS = 60_000;
 const MAX_SKEW_S = 60;
 
-export const signatureMessage = (username: string, nonce: string, ts: number) =>
-  Buffer.from(`${SIGNATURE_PREFIX}|${username.trim().toLowerCase()}|${nonce}|${ts}`);
+/** The origin a signature names: scheme://host[:port] in lower case, without path or default port. */
+export const signatureOrigin = (url: string): string => new URL(url).origin;
 
-/** Client side (CLI, tests): signs the login message with a PEM private key. */
-export function signLogin(privateKeyPem: string, username: string, nonce: string, ts = Math.floor(Date.now() / 1000)): { ts: number; signature: string } {
+export const signatureMessage = (origin: string, username: string, nonce: string, ts: number) =>
+  Buffer.from(`${SIGNATURE_PREFIX}|${origin}|${username.trim().toLowerCase()}|${nonce}|${ts}`);
+
+const legacyMessage = (username: string, nonce: string, ts: number) => Buffer.from(`${LEGACY_PREFIX}|${username}|${nonce}|${ts}`);
+
+/**
+ * Client side (CLI, tests): signs the login message with a PEM private key. `serverUrl` is the
+ * URL the client sends the login to, from its own settings: never a value the server returns.
+ */
+export function signLogin(privateKeyPem: string, serverUrl: string, username: string, nonce: string, ts = Math.floor(Date.now() / 1000)): { ts: number; signature: string } {
   const key = createPrivateKey(privateKeyPem);
-  const msg = signatureMessage(username, nonce, ts);
+  const msg = signatureMessage(signatureOrigin(serverUrl), username, nonce, ts);
   const sig = key.asymmetricKeyType === "ed25519" ? cryptoSign(null, msg, key) : cryptoSign("sha256", msg, { key, dsaEncoding: "ieee-p1363" });
   return { ts, signature: sig.toString("base64") };
 }
@@ -57,15 +72,45 @@ function verifyWith(k: KeyObject, msg: Buffer, sig: Buffer): boolean {
   }
 }
 
+/**
+ * A valid signature of a key of the user over a message this server does not accept. It comes
+ * from the key holder (directly or relayed), so it gets its own error, but never a session.
+ */
+export interface SignatureRefusal {
+  /** outdated: the old cb-auth-v1 message; origin: the origin the client sent, not one of this server. */
+  refused: "outdated" | "origin";
+  /** Owner of the key: the user named in the request. */
+  ownerId: string;
+  keyId: string;
+  /** The signed origin, for `refused: "origin"`. */
+  origin?: string;
+}
+
+const originOrNull = (url: string | undefined): string | null => {
+  if (!url) return null;
+  try {
+    const o = signatureOrigin(url);
+    return o === "null" ? null : o;
+  } catch {
+    return null;
+  }
+};
+
 export class SignatureLogin {
   private readonly ca: X509Certificate[];
+  private readonly origins: string[];
 
-  /** `caPems`: certificates of the company CA(s) that may issue client certificates. */
+  /**
+   * `origins`: the URLs of this server (PUBLIC_URL, WEBAUTHN_EXTRA_ORIGINS), the only origins a
+   * signature may name. `caPems`: certificates of the company CA(s) that may issue client certificates.
+   */
   constructor(
     private readonly sql: Sql,
+    origins: string[],
     caPems: string[] = [],
   ) {
     this.ca = caPems.map((p) => new X509Certificate(p));
+    this.origins = [...new Set(origins.map(originOrNull).filter((o): o is string => o !== null))];
   }
 
   async addKey(principalId: string, pem: string, name = "Chiave"): Promise<PublicKeyInfo> {
@@ -129,11 +174,22 @@ export class SignatureLogin {
     await this.sql`
       insert into auth_challenges (id, purpose, principal_id, challenge, expires_at)
       values (${challengeId}, 'signature-login', ${p?.id ?? null}, ${nonce}, ${expiresAt})`;
-    return { challengeId, nonce, expiresAt, format: `${SIGNATURE_PREFIX}|<username>|<nonce>|<unix seconds>` };
+    return { challengeId, nonce, expiresAt, format: `${SIGNATURE_PREFIX}|<origin of the server URL>|<username>|<nonce>|<unix seconds>` };
   }
 
-  /** Returns the principal id, or null (never says why: the caller records a failure). */
-  async verify(input: { username: string; challengeId: string; ts: number; signature: string }): Promise<{ principalId: string; keyId: string } | null> {
+  /**
+   * Returns the principal id when a key of the user signed the message for an origin of this server.
+   * Returns a refusal when a key of the user signed the old v1 message, or the message for the
+   * `origin` the client sent and this server does not accept. Otherwise null (never says why: the
+   * caller records a failure).
+   */
+  async verify(input: {
+    username: string;
+    challengeId: string;
+    ts: number;
+    signature: string;
+    origin?: string;
+  }): Promise<{ principalId: string; keyId: string } | SignatureRefusal | null> {
     const [ch] = await this.sql<{ principal_id: string | null; challenge: string }[]>`
       update auth_challenges set used_at = now()
       where id = ${input.challengeId} and purpose = 'signature-login' and used_at is null and expires_at > now()
@@ -148,7 +204,12 @@ export class SignatureLogin {
     } catch {
       return null;
     }
-    const msg = signatureMessage(owner.name, ch.challenge, input.ts);
+    const accepted = this.origins.map((o) => signatureMessage(o, owner.name, ch.challenge, input.ts));
+    const legacy = legacyMessage(owner.name, ch.challenge, input.ts);
+    // the origin the client says it signed, when this server does not accept it: only to explain the refusal
+    const claimed = originOrNull(input.origin);
+    const foreign = claimed && !this.origins.includes(claimed) ? { origin: claimed, msg: signatureMessage(claimed, owner.name, ch.challenge, input.ts) } : null;
+    let refusal: SignatureRefusal | null = null;
     const keys = await this.sql<{ id: string; kind: string; pem: string }[]>`
       select id, kind, pem from public_keys where principal_id = ${ch.principal_id} and revoked_at is null`;
     for (const k of keys) {
@@ -164,11 +225,14 @@ export class SignatureLogin {
       } catch {
         continue; // expired or no longer trusted certificate
       }
-      if (verifyWith(pub, msg, sig)) {
+      if (accepted.some((m) => verifyWith(pub, m, sig))) {
         await this.sql`update public_keys set last_used_at = now() where id = ${k.id}`;
         return { principalId: ch.principal_id, keyId: k.id };
       }
+      if (refusal) continue;
+      if (verifyWith(pub, legacy, sig)) refusal = { refused: "outdated", ownerId: ch.principal_id, keyId: k.id };
+      else if (foreign && verifyWith(pub, foreign.msg, sig)) refusal = { refused: "origin", ownerId: ch.principal_id, keyId: k.id, origin: foreign.origin };
     }
-    return null;
+    return refusal;
   }
 }

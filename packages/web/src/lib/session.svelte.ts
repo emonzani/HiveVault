@@ -1,6 +1,8 @@
 // Logged-in user, vaults and the cloud agent notice (D1). One instance for the whole app.
 import { api, ApiError, setCsrf, setUnauthenticatedHandler } from "./api.ts";
 import type { Me, Vault } from "./types.ts";
+import { ui } from "./ui.svelte.ts";
+import { ws } from "./workspace.svelte.ts";
 
 class Session {
   me = $state<Me | null>(null);
@@ -26,6 +28,7 @@ class Session {
   constructor() {
     setUnauthenticatedHandler(() => {
       if (this.me) this.me = null;
+      ws.setOwner(null);
     });
   }
 
@@ -38,6 +41,7 @@ class Session {
     } catch (e) {
       if (!(e instanceof ApiError) || e.status !== 401) console.error(e);
       this.me = null;
+      ws.setOwner(null);
     } finally {
       this.ready = true;
     }
@@ -46,6 +50,7 @@ class Session {
   apply(me: Me): void {
     this.me = me;
     setCsrf(me.csrf);
+    ws.setOwner(me.principal.id);
     let saved: string | null = null;
     try {
       saved = localStorage.getItem(`cb-vault-${me.principal.id}`);
@@ -71,12 +76,18 @@ class Session {
   }
 
   async logout(): Promise<void> {
+    // The app leaves the session only when the server confirms the logout. A failed request
+    // (network, 429, 5xx) leaves the session cookie valid: the login screen would hide a live
+    // session from the next person at this browser. Stay signed in and show the error.
     try {
       await api.post("/api/auth/logout");
-    } finally {
-      this.me = null;
-      setCsrf(null);
+    } catch (e) {
+      ui.toast((e as Error).message, "error");
+      return;
     }
+    this.me = null;
+    setCsrf(null);
+    ws.setOwner(null);
   }
 }
 

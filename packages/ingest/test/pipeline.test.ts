@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -96,8 +96,8 @@ describe("ingestion pipeline", () => {
     const v = await vault("ing-all");
     const formats = ["md", "txt", "csv", "docx", "xlsx", "pptx", "pdf", "eml", "html", "code", "zip", "image", "mbox"];
     const ext: Record<string, string> = { md: "nota-0.md", txt: "appunti-0.txt", csv: "ordini-0.csv", docx: "analisi-0.docx", xlsx: "listino-0.xlsx", pptx: "stato-0.pptx", pdf: "verbale-0.pdf", eml: "messaggio-0.eml", html: "pagina-0.html", code: "servizio-0.ts", zip: "archivio-0.zip", image: "scansione-0.png", mbox: "casella-0.mbox" };
-    for (const f of formats) await service!.upload(v.id, await readFile(path.join(corpus, f, ext[f]!)), ext[f]!, null);
-    await service!.upload(v.id, Buffer.from([0, 1, 2, 3, 0xff, 0xfe, 0, 9]), "dati.bin", null);
+    for (const f of formats) await service!.upload(v.id, await readFile(path.join(corpus, f, ext[f]!)), ext[f]!, null, "system");
+    await service!.upload(v.id, Buffer.from([0, 1, 2, 3, 0xff, 0xfe, 0, 9]), "dati.bin", null, "system");
     await settle(v.id);
 
     const rows = await sql!<{ name: string; status: string; level: number; origin: string; parent: string | null }[]>`
@@ -117,18 +117,20 @@ describe("ingestion pipeline", () => {
 
   db()("the content is searchable at once and the original stays encrypted on disk", async () => {
     const v = await vault("ing-search");
-    const r = await service!.upload(v.id, Buffer.from(`# Verbale ${run}\n\nIl progetto Zeffiro-${run} ha una consegna il 12 marzo.`), "verbale.md", null);
+    const r = await service!.upload(v.id, Buffer.from(`# Verbale ${run}\n\nIl progetto Zeffiro-${run} ha una consegna il 12 marzo.`), "verbale.md", null, "system");
     await settle(v.id);
     const s = await search!.search({ id: "u", vaults: [v.id], clearance: 3 }, `Zeffiro-${run} consegna`);
     expect(s.hits[0]).toMatchObject({ kind: "source", id: r.source.id, level: "I2" });
-    const raw = await readFile(path.join(tmp, "blobs", v.id, r.source.sha256.slice(0, 2), r.source.sha256.slice(2, 4), r.source.sha256));
-    expect(raw.includes(Buffer.from("Zeffiro"))).toBe(false);
+    const files = (await readdir(path.join(tmp, "blobs", v.id), { recursive: true, withFileTypes: true })).filter((e) => e.isFile());
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.some((f) => f.name === r.source.sha256)).toBe(false); // keyed file names
+    for (const f of files) expect((await readFile(path.join(f.parentPath, f.name))).includes(Buffer.from("Zeffiro"))).toBe(false);
   });
 
   db()("emails are at least riservato with their attachments; switched off, they stop as unsupported", async () => {
     const v = await vault("ing-mail");
     const eml = await readFile(path.join(corpus, "eml", "messaggio-0.eml"));
-    const r = await service!.upload(v.id, eml, "messaggio-0.eml", null, { classification: 1 });
+    const r = await service!.upload(v.id, eml, "messaggio-0.eml", null, "system", { classification: 1 });
     await settle(v.id);
     const rows = await sql!<{ origin: string; classification: number }[]>`select origin, classification from sources where vault_id = ${v.id} order by origin`;
     expect(rows).toEqual([{ origin: "attachment", classification: 2 }, { origin: "upload", classification: 2 }]);
@@ -143,7 +145,7 @@ describe("ingestion pipeline", () => {
     try {
       const w = await vault("ing-nomail");
       const svc = new IngestService(sql!, store!, engine2, off, undefined, { compileUploads: false });
-      const s = await svc.upload(w.id, eml, "messaggio-0.eml", null);
+      const s = await svc.upload(w.id, eml, "messaggio-0.eml", null, "system");
       await settle(w.id);
       expect(await store!.get(s.source.id)).toMatchObject({ status: "unsupported", error: expect.stringContaining("email") });
       expect(await sql!`select 1 from sources where parent_id = ${s.source.id}`).toHaveLength(0);
@@ -154,8 +156,8 @@ describe("ingestion pipeline", () => {
 
   db()("the same file twice is one source", async () => {
     const v = await vault("ing-dedup");
-    const a = await service!.upload(v.id, Buffer.from("stesso contenuto " + run), "a.txt", null);
-    const b = await service!.upload(v.id, Buffer.from("stesso contenuto " + run), "copia.txt", null);
+    const a = await service!.upload(v.id, Buffer.from("stesso contenuto " + run), "a.txt", null, "system");
+    const b = await service!.upload(v.id, Buffer.from("stesso contenuto " + run), "copia.txt", null, "system");
     expect(a.created).toBe(true);
     expect(b).toMatchObject({ created: false, source: { id: a.source.id } });
   });
@@ -163,7 +165,7 @@ describe("ingestion pipeline", () => {
   db()("compiles a source: extractive page + model pages, a page without citations is refused", async () => {
     const v = await vault("ing-compile");
     scriptCalls = 0;
-    const r = await service!.upload(v.id, await readFile(path.join(corpus, "eml", "messaggio-0.eml")), "messaggio-0.eml", null, { compile: true });
+    const r = await service!.upload(v.id, await readFile(path.join(corpus, "eml", "messaggio-0.eml")), "messaggio-0.eml", null, "system", { compile: true });
     await settle(v.id);
     const src = (await store!.get(r.source.id))!;
     expect(src).toMatchObject({ level: 3, status: "compiled" });
@@ -187,7 +189,7 @@ describe("ingestion pipeline", () => {
 
   db()("a reingest that extracts the same text skips the model (M20); the queue knows the time of a compile (M14)", async () => {
     const v = await vault("ing-same");
-    const r = await service!.upload(v.id, Buffer.from(`# Nota ${run}\n\nIl fornitore Gamma ${run} consegna ogni martedì.`), `nota-${run}.md`, null, { compile: true });
+    const r = await service!.upload(v.id, Buffer.from(`# Nota ${run}\n\nIl fornitore Gamma ${run} consegna ogni martedì.`), `nota-${run}.md`, null, "system", { compile: true });
     await settle(v.id);
     const first = (await store!.get(r.source.id))!;
     expect(first).toMatchObject({ level: 3, status: "compiled" });
@@ -229,13 +231,13 @@ describe("ingestion pipeline", () => {
         throw new Error(`task ${id}: ${JSON.stringify(await state(id))}`);
       };
 
-      const a = await svc.upload(v.id, Buffer.from("# Nota\n\nRinnovo del contratto con il cliente Alfa per 40 postazioni."), "nota.md", null, { compile: true });
+      const a = await svc.upload(v.id, Buffer.from("# Nota\n\nRinnovo del contratto con il cliente Alfa per 40 postazioni."), "nota.md", null, "system", { compile: true });
       // I1 is reached; then the task waits in the compile phase without holding a worker
       const sleeping = await until(a.taskId!, (x) => x.phase === "compile" && x.status === "sleeping");
       expect(sleeping.attempts).toBe(0);
       expect((await store!.get(a.source.id))!.level).toBe(1);
       // a second document is read meanwhile: the busy chat model does not block it
-      const b = await svc.upload(v.id, Buffer.from("# Altra nota\n\nTesto breve."), "altra.md", null, { compile: false });
+      const b = await svc.upload(v.id, Buffer.from("# Altra nota\n\nTesto breve."), "altra.md", null, "system", { compile: false });
       await until(b.taskId!, (x) => x.status === "done");
 
       busy = false;
@@ -244,7 +246,7 @@ describe("ingestion pipeline", () => {
 
       // the source goes away while its compile waits: the task ends with a clear error
       busy = true;
-      const c = await svc.upload(v.id, Buffer.from("# Terza\n\nDa eliminare prima della compilazione."), "terza.md", null, { compile: true });
+      const c = await svc.upload(v.id, Buffer.from("# Terza\n\nDa eliminare prima della compilazione."), "terza.md", null, "system", { compile: true });
       await until(c.taskId!, (x) => x.phase === "compile" && x.status === "sleeping");
       await sql!`delete from chunks where source_id = ${c.source.id}`;
       await sql!`delete from sources where id = ${c.source.id}`;
@@ -257,7 +259,7 @@ describe("ingestion pipeline", () => {
 
   db()("compiles on demand after repeated search hits", async () => {
     const v = await vault("ing-demand");
-    const r = await service!.upload(v.id, Buffer.from(`Relazione sul fornitore Vortice-${run}: consegne puntuali.`), "relazione.txt", null);
+    const r = await service!.upload(v.id, Buffer.from(`Relazione sul fornitore Vortice-${run}: consegne puntuali.`), "relazione.txt", null, "system");
     await settle(v.id);
     const hit = { kind: "source" as const, id: r.source.id, level: "I2" as const };
     await service!.onSearchHits([hit]);

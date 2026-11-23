@@ -160,7 +160,9 @@ Fuori da `localhost` usa sempre HTTPS. Le passkey e i cookie sicuri non funziona
 
 - Con un certificato aziendale: passa `--tls-cert` e `--tls-key` allo script, oppure imposta `TLS_CERT_FILE` e `TLS_KEY_FILE` in `.env`.
 - Senza una CA aziendale: `bash scripts/dev-ca.sh brain.azienda.local` crea una CA e un certificato. Installa `data/tls/ca.pem` come radice attendibile sui computer degli utenti.
-- Dietro un reverse proxy: imposta `TRUST_PROXY=true`. Il proxy deve passare `X-Forwarded-For`.
+- Dietro un reverse proxy: imposta in `TRUST_PROXY` gli indirizzi dei proxy, separati da virgole. Ogni indirizzo è un IP o un intervallo CIDR. Esempio per un proxy sullo stesso server: `TRUST_PROXY=127.0.0.1,::1`. Con più proxy in catena, indica gli indirizzi di tutti i proxy. Il server usa come indirizzo del client l'ultimo indirizzo di `X-Forwarded-For` che non è un proxy dell'elenco.
+- Il proxy deve sostituire `X-Forwarded-For` con l'indirizzo del client. Non deve aggiungere l'indirizzo a un valore che manda il client. Esempio per nginx: `proxy_set_header X-Forwarded-For $remote_addr;`.
+- Senza reverse proxy, lascia `TRUST_PROXY=false`. Il server non parte con `TRUST_PROXY=true`, con un intervallo che contiene tutti gli indirizzi (per esempio `0.0.0.0/0`) o con un valore non valido. Il messaggio di errore è nel log del servizio.
 
 ## 8. Controllo finale
 
@@ -202,6 +204,7 @@ Il primo amministratore, prima di creare gli utenti:
 |---|---|---|
 | «l'utente non può usare Docker» | L'utente non è nel gruppo `docker` | `sudo usermod -aG docker brain`, poi esci e rientra |
 | Il servizio non parte dopo un riavvio del server | Servizio utente senza linger | `sudo loginctl enable-linger brain` |
+| Il servizio non parte: «TRUST_PROXY=true is no longer accepted» | `.env` contiene `TRUST_PROXY=true`. Ora `TRUST_PROXY` è l'elenco degli indirizzi dei proxy | Imposta gli indirizzi del reverse proxy (§7), oppure `TRUST_PROXY=false` senza proxy |
 | I pannelli delle dashboard restano vuoti | Il server non è avviato da almeno un minuto | Attendi 2 minuti; controlla `journalctl -u hivevault` |
 | I documenti restano «in attesa» | Nessun endpoint di embedding attivo | Configura i modelli (§6) e controlla **Console → Modelli** |
 | «Modello diverso» nella pagina Modelli | L'endpoint usa un altro modello di embedding | Usa lo stesso file GGUF su tutti gli host |

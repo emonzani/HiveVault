@@ -80,6 +80,41 @@ describe("markdown", () => {
     ]);
   });
 
+  it("parses the edge cases of the heading syntax", () => {
+    const cases: [string, [string, number, string, number, number, number][]][] = [
+      ["# Titolo", [["titolo", 1, "Titolo", 0, 8, 8]]],
+      ["## Titolo chiuso ##", [["titolo-chiuso", 2, "Titolo chiuso", 0, 19, 19]]],
+      ["### Titolo #  ", [["titolo", 3, "Titolo", 0, 14, 14]]],
+      ["#\tTab\t#\t", [["tab", 1, "Tab", 0, 8, 8]]],
+      ["###### Sei", [["sei", 6, "Sei", 0, 10, 10]]],
+      ["####### Sette", [["intro", 0, "", 0, 0, 13]]],
+      ["#Senza spazio", [["intro", 0, "", 0, 0, 13]]],
+      ["# ", [["intro", 0, "", 0, 0, 2]]],
+      ["#  ", [["pagina", 1, "", 0, 3, 3]]],
+      ["# #", [["pagina", 1, "", 0, 3, 3]]],
+      ["# C# e F#", [["c-e-f", 1, "C# e F", 0, 9, 9]]],
+      ["# a # b", [["a-b", 1, "a # b", 0, 7, 7]]],
+      ["# Titolo `#`", [["titolo", 1, "Titolo `#`", 0, 12, 12]]],
+      ["# Titolo # ", [["titolo", 1, "Titolo", 0, 11, 11]]],
+      ["# Uno\r\nTesto\r\n## Due ##\r\n", [["uno", 1, "Uno", 0, 7, 14], ["due", 2, "Due", 14, 25, 25]]],
+      ["Intro\n\n```\n# non un titolo\n```\n## Dopo il codice\nTesto", [["intro", 0, "", 0, 0, 31], ["dopo-il-codice", 2, "Dopo il codice", 31, 49, 54]]],
+      ["# A\n## A\n### B ###\n## A", [["a", 1, "A", 0, 4, 4], ["a-2", 2, "A", 4, 9, 9], ["b", 3, "B", 9, 19, 19], ["a-3", 2, "A", 19, 23, 23]]],
+    ];
+    for (const [body, expected] of cases) {
+      expect(sections(body).map((s) => [s.id, s.level, s.title, s.headingStart, s.start, s.end]), JSON.stringify(body)).toEqual(expected);
+    }
+  });
+
+  it("parses long heading lines in linear time", () => {
+    const bodies = ["# a" + " ".repeat(49_990) + "b", "# " + "#".repeat(49_990) + " x", "# a" + " \t#".repeat(16_000) + "b"];
+    for (const body of bodies) {
+      const t = performance.now();
+      const s = sections(body);
+      expect(performance.now() - t).toBeLessThan(500);
+      expect(s.map((x) => x.level)).toEqual([1]);
+    }
+  });
+
   it("finds explicit block ids", () => {
     const b = explicitBlocks(parseDocument(PAGE).body);
     expect(b.map((x) => x.id)).toEqual(["^stato1"]);
@@ -87,6 +122,54 @@ describe("markdown", () => {
 
   it("takes the first paragraph as tldr, without link syntax", () => {
     expect(firstParagraph(parseDocument(PAGE).body)).toBe("Cliente fintech dal 2024. Referente Nome.");
+  });
+
+  it("keeps the citations of nested, empty and unclosed brackets", () => {
+    const cases: [string, [string, string, string | null, number][]][] = [
+      ["a ^[src_1#c2] b ^[src_2] c", [["src_1#c2", "src_1", "c2", 2], ["src_2", "src_2", null, 16]]],
+      ["^[a^[b]", [["a^[b", "a^[b", null, 0]]],
+      ["^[^[^[x]", [["^[^[x", "^[^[x", null, 0]]],
+      ["^[]^[a]", [["a", "a", null, 3]]],
+      ["^[a\nb]^[c]", [["c", "c", null, 6]]],
+      ["^[ src_1 # c3 # x ]", [[" src_1 # c3 # x ", "src_1", "c3", 0]]],
+      ["^[a]]^[b", [["a", "a", null, 0]]],
+      ["`^[code]` ^[real]", [["real", "real", null, 10]]],
+      ["^[a|b]^[[c]]", [["a|b", "a|b", null, 0], ["[c", "[c", null, 6]]],
+      ["^^[a]^[", [["a", "a", null, 1]]],
+    ];
+    for (const [body, expected] of cases) {
+      expect(extractCitations(body).map((c) => [c.ref, c.source, c.chunk, c.offset])).toEqual(expected);
+    }
+  });
+
+  it("keeps the tldr of nested, empty and unclosed brackets", () => {
+    const cases: [string, string][] = [
+      ["Vedi [[Pagina|testo]] e [[Altra]] ^[src_1#c1].", "Vedi testo e Altra ."],
+      ["[[|[[a|b]]", "[[|b"],
+      ["[[x|[[y|z]a]]", "[[x|[[y|z]a]]"],
+      ["[[x|[[y|z]]", "[[y|z"],
+      ["[[]] [[x|]] [[|y]] ^[]", "[[]] x| |y ^[]"],
+      ["[[a|b|c]] [[[a]]", "b|c [a"],
+      ["[[a\nb|c\nd]] fine", "c d fine"],
+      ["[[a]b]] [[c|d]e]]", "[[a]b]] [[c|d]e]]"],
+      ["^[a\nb] testo ^[c", "testo ^[c"],
+      ["[[x| aperto", "[[x| aperto"],
+      ["^[ aperto [[ aperto", "^[ aperto [[ aperto"],
+      ["[[a|$1]] [[$&]]", "$1 $&"],
+      ["- [[A|uno]]\n- ^[s] due", "uno due"],
+    ];
+    for (const [body, expected] of cases) expect(firstParagraph(body)).toBe(expected);
+  });
+
+  it("scans long unclosed citations and links in linear time", () => {
+    // Quadratic scans take seconds at this size; linear scans take a few milliseconds.
+    const n = 100_000;
+    for (const body of ["^[".repeat(n), "[[".repeat(n), "[[x|".repeat(n / 2), "^[a\n".repeat(n / 2)]) {
+      const t = performance.now();
+      expect(extractCitations(body)).toEqual([]);
+      expect(firstParagraph(body, body.length * 2)).toBe(body.replace(/\s+/g, " ").trim());
+      expect(performance.now() - t).toBeLessThan(500);
+    }
   });
 });
 

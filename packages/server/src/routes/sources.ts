@@ -36,13 +36,20 @@ export function sourceRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, 
         if (classification === PERSONAL && !Access.ownsPersonal(a.ctx, req.params.vaultId)) throw notOwner();
         continue;
       }
-      const r = await ingest.upload(req.params.vaultId, part.file, part.filename || "senza-nome", a.principal.id, {
+      const name = part.filename || "senza-nome";
+      const r = await ingest.upload(req.params.vaultId, part.file, name, a.principal.id, Access.toReader(a.ctx, [req.params.vaultId]), {
         ...(compile !== undefined ? { compile } : {}),
         ...(classification !== undefined ? { classification } : {}),
       });
       if (part.file.truncated) {
-        await sql`update sources set status = 'failed', error = 'file oltre il limite di dimensione' where id = ${r.source.id}`;
+        if (r.source) await sql`update sources set status = 'failed', error = 'file oltre il limite di dimensione' where id = ${r.source.id}`;
         throw new AuthError("invalid_request", `"${part.filename}" supera il limite di ${Math.round(o.uploadMaxBytes / 1024 ** 2)} MB.`);
+      }
+      if (!r.source) {
+        // the same bytes as a source the caller may not read: nothing about that source
+        results.push({ name, duplicate: true });
+        auth.audit.write({ principalId: a.principal.id, action: "source.upload", resource: null, ...meta(req), data: { vault: req.params.vaultId, name, duplicate: true } });
+        continue;
       }
       results.push({ id: r.source.id, name: r.source.name, size: r.source.size, created: r.created, status: r.source.status, taskId: r.taskId });
       auth.audit.write({ principalId: a.principal.id, action: "source.upload", resource: r.source.id, ...meta(req), data: { vault: req.params.vaultId, name: r.source.name, size: r.source.size, created: r.created } });
@@ -68,7 +75,11 @@ export function sourceRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, 
       if (req.body.classification === PERSONAL && !Access.ownsPersonal(a.ctx, req.params.vaultId)) throw notOwner();
       try {
         const { url, ...opts } = req.body;
-        const r = await ingest.link(req.params.vaultId, url, a.principal.id, opts);
+        const r = await ingest.link(req.params.vaultId, url, a.principal.id, Access.toReader(a.ctx, [req.params.vaultId]), opts);
+        if (!r.source) {
+          await auth.audit.writeNow({ principalId: a.principal.id, action: "source.link", resource: null, ...meta(req), data: { url, duplicate: true } });
+          return reply.status(202).send({ url, duplicate: true });
+        }
         await auth.audit.writeNow({ principalId: a.principal.id, action: "source.link", resource: r.source.id, ...meta(req), data: { url: r.source.path } });
         return reply.status(202).send({ id: r.source.id, created: r.created, status: r.source.status, url: r.source.path });
       } catch (e) {
@@ -198,8 +209,8 @@ export function sourceRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, 
     "/api/sources/:id/relink",
     { schema: { body: { type: "object", required: ["url"], properties: { url: str(2000) }, additionalProperties: false } } },
     async (req) => {
-      const { a } = await owned(req, req.params.id);
-      const r = await ingest.relink(req.params.id, req.body.url, a.principal.id).catch(sourceError);
+      const { a, vaultId } = await owned(req, req.params.id);
+      const r = await ingest.relink(req.params.id, req.body.url, a.principal.id, Access.toReader(a.ctx, [vaultId])).catch(sourceError);
       await auth.audit.writeNow({ principalId: a.principal.id, action: "source.relink", resource: req.params.id, ...meta(req), data: { url: r.source.path, replacedBy: r.source.id } });
       return { id: r.source.id, created: r.created, status: r.source.status, url: r.source.path };
     },

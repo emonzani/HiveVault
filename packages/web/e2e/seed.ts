@@ -101,7 +101,7 @@ for (const t of THEMES) {
     path: `https://example.com/${t}/${run}`,
     createdBy: main.id,
     meta: { url: `https://example.com/${t}/${run}`, warnings: ["little_text"] },
-  });
+  }, "system");
   await s.sql`update sources set status = 'indexed', level = 1, title = ${`Rivedere ${t} ${run}`} where id = ${source.id}`;
 }
 

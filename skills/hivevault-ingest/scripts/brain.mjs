@@ -80,14 +80,14 @@ switch (cmd) {
     if (cls) form.append("classification", String(CLASS[cls] ?? cls));
     for (const f of files) form.append("file", new Blob([await readFile(f)]), basename(f));
     const r = await call("POST", `/api/vaults/${id}/sources`, form);
-    for (const s of r.sources) console.log(`${s.id}  ${s.created ? "nuovo" : "già presente"}  ${s.name}`);
+    for (const s of r.sources) console.log(`${s.id ?? "-"}  ${s.created ? "nuovo" : "già presente"}  ${s.name}`);
     break;
   }
   case "link": {
     const [vault, url] = positional;
     if (!vault || !url) usage(2);
     const r = await call("POST", `/api/vaults/${await vaultId(vault)}/links`, JSON.stringify({ url, compile: flag("compile") }), { "content-type": "application/json" });
-    console.log(`${r.id}  ${r.created ? "nuovo" : "già presente"}  ${r.url}`);
+    console.log(`${r.id ?? "-"}  ${r.created ? "nuovo" : "già presente"}  ${r.url}`);
     break;
   }
   case "status": {

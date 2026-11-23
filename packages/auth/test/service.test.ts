@@ -1,12 +1,12 @@
-import { generateKeyPairSync, randomBytes, X509Certificate } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign as cryptoSign, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { Sql } from "@cb/db";
 import { setupTestDb } from "@cb/db/testing";
 import { ulid } from "@cb/shared";
-import { Access, AuthError, AuthService, base32Decode, ipAllowed, sha256hex, signLogin, totp } from "../src/index.ts";
+import { Access, apiCap, AuthError, AuthService, base32Decode, ipAllowed, sha256hex, signLogin, totp } from "../src/index.ts";
 import { SoftAuthenticator } from "./soft-authenticator.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -64,12 +64,64 @@ describe("TOTP login", () => {
     expect(audit.some((a) => a.principalId === p.id)).toBe(true);
   });
 
+  db()("concurrent wrong codes: only the first 5 reach verification, the rest are locked", async () => {
+    const { p } = await enrolledUser();
+    const errs = await Promise.all(Array.from({ length: 20 }, () => auth!.loginTotp(p.name, "000000").catch((e) => e)));
+    expect(errs.filter((e) => e.code === "invalid_credentials")).toHaveLength(5);
+    expect(errs.filter((e) => e.code === "locked")).toHaveLength(15);
+    expect((await auth!.lockout.check(p.name)).failures).toBe(5);
+  });
+
+  db()("an error during verification is not recorded as a failure", async () => {
+    const { p } = await enrolledUser();
+    const spy = vi.spyOn(auth!.totp, "verify").mockRejectedValueOnce(new Error("db down"));
+    try {
+      await expect(auth!.loginTotp(p.name, "000000")).rejects.toThrow("db down");
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await auth!.lockout.check(p.name)).failures).toBe(0);
+  });
+
   db()("recovery codes work once", async () => {
     const { p, recovery } = await enrolledUser();
     expect(recovery).toHaveLength(10);
     await auth!.loginRecovery(p.name, recovery[0]!.toUpperCase());
     await expect(auth!.loginRecovery(p.name, recovery[0]!)).rejects.toBeInstanceOf(AuthError);
     expect(await auth!.totp.remainingRecoveryCodes(p.id)).toBe(9);
+  });
+
+  db()("stores recovery codes under the keyed hash, not as plain SHA-256", async () => {
+    const { p, recovery } = await enrolledUser();
+    const rows = await sql!<{ code_hash: string }[]>`select code_hash from recovery_codes where principal_id = ${p.id}`;
+    expect(rows).toHaveLength(10);
+    expect(rows.every((r) => r.code_hash.startsWith("k1:"))).toBe(true);
+    const plain = recovery.map((c) => sha256hex(`${p.id}:${c.toUpperCase().replace(/[^A-Z0-9]/g, "")}`));
+    expect(rows.some((r) => plain.some((h) => r.code_hash.includes(h)))).toBe(false);
+  });
+
+  db()("recovery codes stored as plain SHA-256 work once, before and after the upgrade", async () => {
+    const { p } = await enrolledUser();
+    const plain = (c: string) => sha256hex(`${p.id}:${c}`);
+    await sql!`delete from recovery_codes where principal_id = ${p.id}`;
+    for (const c of ["AAAABBBB", "CCCCDDDD", "EEEEFFFF"]) await sql!`insert into recovery_codes (principal_id, code_hash) values (${p.id}, ${plain(c)})`;
+    await sql!`update recovery_codes set used_at = now() where principal_id = ${p.id} and code_hash = ${plain("EEEEFFFF")}`;
+    // before the upgrade
+    await auth!.loginRecovery(p.name, "aaaa-bbbb");
+    await expect(auth!.loginRecovery(p.name, "aaaa-bbbb")).rejects.toBeInstanceOf(AuthError);
+    // the upgrade rewrites the rows once and keeps their used state
+    await auth!.totp.upgradeRecoveryCodes();
+    await auth!.totp.upgradeRecoveryCodes();
+    const rows = await sql!<{ code_hash: string; used: boolean }[]>`select code_hash, used_at is not null as used from recovery_codes where principal_id = ${p.id}`;
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.code_hash.startsWith("k1:"))).toBe(true);
+    expect(rows.filter((r) => r.used)).toHaveLength(2);
+    expect(await auth!.totp.remainingRecoveryCodes(p.id)).toBe(1);
+    await expect(auth!.loginRecovery(p.name, "aaaa-bbbb")).rejects.toBeInstanceOf(AuthError);
+    await expect(auth!.loginRecovery(p.name, "eeee-ffff")).rejects.toBeInstanceOf(AuthError);
+    await auth!.loginRecovery(p.name, "cccc-dddd");
+    await expect(auth!.loginRecovery(p.name, "cccc-dddd")).rejects.toBeInstanceOf(AuthError);
+    expect(await auth!.totp.remainingRecoveryCodes(p.id)).toBe(0);
   });
 
   db()("a suspended user cannot log in and loses its sessions", async () => {
@@ -134,7 +186,7 @@ describe("signature login", () => {
       const kp = kind === "ed25519" ? generateKeyPairSync("ed25519") : generateKeyPairSync("ec", { namedCurve: "P-256" });
       await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
       const ch = await auth!.signature.challenge(p.name);
-      const signed = signLogin(kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string, p.name, ch.nonce);
+      const signed = signLogin(kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string, ORIGIN, p.name, ch.nonce);
       const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signed });
       expect(r.principal.id).toBe(p.id);
       await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signed })).rejects.toBeInstanceOf(AuthError);
@@ -148,12 +200,12 @@ describe("signature login", () => {
     await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
     const priv = kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string;
     let ch = await auth!.signature.challenge(other.p.name);
-    await expect(auth!.loginSignature({ username: other.p.name, challengeId: ch.challengeId, ...signLogin(priv, other.p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
+    await expect(auth!.loginSignature({ username: other.p.name, challengeId: ch.challengeId, ...signLogin(priv, ORIGIN, other.p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
     ch = await auth!.signature.challenge(p.name);
-    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(priv, p.name, ch.nonce, Math.floor(Date.now() / 1000) - 600) })).rejects.toBeInstanceOf(AuthError);
+    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(priv, ORIGIN, p.name, ch.nonce, Math.floor(Date.now() / 1000) - 600) })).rejects.toBeInstanceOf(AuthError);
     const stranger = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }) as string;
     ch = await auth!.signature.challenge(p.name);
-    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(stranger, p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
+    await expect(auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(stranger, ORIGIN, p.name, ch.nonce) })).rejects.toBeInstanceOf(AuthError);
   });
 
   db()("accepts a client certificate of the company CA and refuses a self-signed one", async () => {
@@ -166,8 +218,52 @@ describe("signature login", () => {
     expect(key.kind).toBe("x509");
     expect(key.notAfter!.getFullYear()).toBeGreaterThan(2030);
     const ch = await auth!.signature.challenge(p.name);
-    const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(fx("client-key.pem"), p.name, ch.nonce) });
+    const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(fx("client-key.pem"), ORIGIN, p.name, ch.nonce) });
     expect(r.principal.id).toBe(p.id);
+  });
+
+  db()("binds the signature to the origin of this server: another server cannot relay it", async () => {
+    const { p } = await enrolledUser();
+    const kp = generateKeyPairSync("ed25519");
+    await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
+    const priv = kp.privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    // the client talked to a relaying server: it signed that server's origin
+    let ch = await auth!.signature.challenge(p.name);
+    const relayed = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(priv, "https://relay.example", p.name, ch.nonce) }).catch((e) => e);
+    expect(relayed.code).toBe("invalid_credentials");
+    ch = await auth!.signature.challenge(p.name);
+    const told = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, origin: "https://relay.example", ...signLogin(priv, "https://relay.example", p.name, ch.nonce) }).catch((e) => e);
+    expect(told.code).toBe("origin_mismatch");
+    const audit = await auth!.audit.query({ action: "login.signature.origin", principalId: p.id, limit: 5 });
+    expect(audit[0]?.data).toMatchObject({ origin: "https://relay.example" });
+    // path, trailing slash and case do not change the origin
+    ch = await auth!.signature.challenge(p.name);
+    const r = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...signLogin(priv, "HTTP://LocalHost:5310/api/", p.name, ch.nonce) });
+    expect(r.principal.id).toBe(p.id);
+  });
+
+  db()("refuses the old v1 message with its own error, without a session or a lockout count", async () => {
+    const { p } = await enrolledUser();
+    const kp = generateKeyPairSync("ed25519");
+    await auth!.signature.addKey(p.id, kp.publicKey.export({ type: "spki", format: "pem" }) as string);
+    const v1 = (key: typeof kp.privateKey, nonce: string) => {
+      const ts = Math.floor(Date.now() / 1000);
+      return { ts, signature: cryptoSign(null, Buffer.from(`cb-auth-v1|${p.name}|${nonce}|${ts}`), key).toString("base64") };
+    };
+    for (let i = 0; i < 6; i++) {
+      const ch = await auth!.signature.challenge(p.name);
+      const e = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...v1(kp.privateKey, ch.nonce) }).catch((x) => x);
+      expect(e.code).toBe("signature_outdated");
+    }
+    expect((await auth!.lockout.check(p.name)).failures).toBe(0);
+    const audit = await auth!.audit.query({ action: "login.signature.outdated", principalId: p.id, limit: 10 });
+    expect(audit).toHaveLength(6);
+    expect(audit[0]).toMatchObject({ outcome: "denied", resource: p.name });
+    // a v1 signature of a key that is not registered is an ordinary failure
+    const ch = await auth!.signature.challenge(p.name);
+    const e = await auth!.loginSignature({ username: p.name, challengeId: ch.challengeId, ...v1(generateKeyPairSync("ed25519").privateKey, ch.nonce) }).catch((x) => x);
+    expect(e.code).toBe("invalid_credentials");
+    expect((await auth!.lockout.check(p.name)).failures).toBe(1);
   });
 
   db()("answers a challenge for an unknown user too (no user enumeration)", async () => {
@@ -238,6 +334,25 @@ describe("authorization", () => {
     expect(Access.can(capi, "vault.read", v1!.id)).toBe(true);
     expect(Access.can(capi, "vault.write", v1!.id)).toBe(false); // read scope caps the admin grant
     expect(() => Access.require(capi, "admin.users")).toThrow(AuthError);
+
+    // a key bound to the member: "projects" alone inherits none of the member's other vaults, "read" does
+    const agent = await auth!.principals.createApiAccount({ name: `agent-p-${run}`, scopes: ["projects"], userId: member.id });
+    expect(Access.toReader(await auth!.access.context(agent)).vaults).toEqual([]);
+    const reader = await auth!.principals.createApiAccount({ name: `agent-r-${run}`, scopes: ["read", "projects"], userId: member.id });
+    expect(Access.toReader(await auth!.access.context(reader)).vaults).toEqual([v1!.id]);
+  });
+
+  it("the projects scope writes project vaults and gives nothing elsewhere without read", () => {
+    expect(apiCap(["projects"], true)).toBe("write");
+    expect(apiCap(["projects"], false)).toBeNull();
+    expect(apiCap(["projects", "admin"], false)).toBeNull();
+    expect(apiCap(["read", "projects"], true)).toBe("write");
+    expect(apiCap(["read", "projects"], false)).toBe("read");
+    expect(apiCap(["read"], true)).toBe("read");
+    expect(apiCap(["read"], false)).toBe("read");
+    expect(apiCap(["ingest", "projects"], false)).toBe("write");
+    expect(apiCap(["write"], false)).toBe("write");
+    expect(apiCap(["admin"], false)).toBeNull();
   });
 });
 

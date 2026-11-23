@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import type { Sql, TransactionSql } from "@cb/db";
 import { createLogger } from "@cb/shared";
-import { CLASSIFICATIONS, PERSONAL, documentCodes, maskCode, normalizeTitle, pageFolder, PageStore, PageVersionError, shortForms, type Page } from "@cb/brain";
+import { CLASSIFICATIONS, PERSONAL, classificationLevel, documentCodes, maskCode, normalizeTitle, pageFolder, PageStore, PageVersionError, shortForms, type Page } from "@cb/brain";
 import { claimHash, NOTE } from "./claims.ts";
 import { NameAutomaton } from "./matcher.ts";
 import { upsertCuratorItem } from "./promote.ts";
@@ -75,15 +75,23 @@ export async function findDuplicates(sql: Sql, vaultId: string, o: { after?: str
 /** A frontmatter list: `aliases: X` in YAML is one string, not a list of letters. */
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === "string" && v.trim() ? [v] : []);
 
+/** The merge would move the text of a private page into a page that is not private. */
+export class MergeVisibilityError extends Error {}
+
 /**
  * Merges `dropId` into `keepId`: the kept page gets the other title as alias and its sections
  * under "Unito da «…»"; the other page goes. Links to the removed page become unresolved and
- * resolve again on the alias in the same write, so no link breaks.
+ * resolve again on the alias in the same write, so no link breaks. A private page is never
+ * merged into a page that is not private (MergeVisibilityError, nothing written): its text
+ * would take the visibility of the kept page and be promoted (invariant 15).
  */
 export async function mergePages(sql: Sql, pages: PageStore, keepId: string, dropId: string, author = "dream:dedup"): Promise<{ kept: string; removed: string; relinked: number }> {
   const keep = await PageStore.get(sql, keepId);
   const drop = await PageStore.get(sql, dropId);
   if (!keep || !drop || keep.vaultId !== drop.vaultId) throw new Error("pages to merge not found in the same vault");
+  if (drop.visibility === 0 && keep.visibility !== 0) {
+    throw new MergeVisibilityError("La pagina da rimuovere è privata e quella da tenere no: tieni la pagina privata o dai alle due pagine la stessa visibilità prima di unirle.");
+  }
   const aliases = new Set<string>([
     ...list(keep.frontmatter.aliases),
     drop.title,
@@ -143,6 +151,8 @@ export interface LinkTarget {
    * of the document would stay on the document.
    */
   link?: string;
+  /** Classification of the target page; a target without one counts as the highest. */
+  classification?: number;
 }
 
 const worthLinking = (n: string) => n.length >= 5 && (/^\p{Lu}/u.test(n) || n.includes(" "));
@@ -159,6 +169,7 @@ export interface TargetRow {
   aliases: string[] | null;
   /** A source page: linked only on names that no compiled page has. */
   source?: boolean;
+  classification?: number;
 }
 
 /**
@@ -185,7 +196,7 @@ function pickTier(rows: TargetRow[], taken: Set<string>): { targets: LinkTarget[
         if (!worthLinking(n) || !linkable(n) || !linkable(link ?? r.title)) continue;
         const k = n.toLowerCase();
         const list = byName.get(k) ?? [];
-        if (!list.some((t) => t.pageId === r.id)) list.push({ name: n, title: r.title, pageId: r.id, ...(link ? { link } : {}) });
+        if (!list.some((t) => t.pageId === r.id)) list.push({ name: n, title: r.title, pageId: r.id, ...(link ? { link } : {}), ...(r.classification !== undefined ? { classification: r.classification } : {}) });
         byName.set(k, list);
       }
     }
@@ -237,7 +248,7 @@ async function targetsOfPass(sql: Sql, vaultId: string, pass: string): Promise<T
 export async function linkTargets(sql: Sql, vaultId: string): Promise<{ targets: LinkTarget[]; ambiguous: number }> {
   const rows = await sql<TargetRow[]>`
     select id, title, case when jsonb_typeof(frontmatter->'aliases') = 'array' then array(select jsonb_array_elements_text(frontmatter->'aliases')) end as aliases,
-           split_part(type, '/', 1) = 'source' as source
+           split_part(type, '/', 1) = 'source' as source, classification
     from pages where vault_id = ${vaultId} and path not like '\\_inbox/%' and classification <> ${PERSONAL}`;
   return pickTargets(rows);
 }
@@ -278,7 +289,9 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Turns the first unlinked mention of every target into a [[link]]. Text inside code, links,
- * citations, headings, callout titles and the page's own name is left alone.
+ * citations, headings, callout titles and the page's own name is left alone. A link writes the
+ * title of its target: targets classified above `ceiling` (the classification of the page) are
+ * left out, as if they did not exist.
  */
 export function crosslinkBody(
   body: string,
@@ -287,8 +300,9 @@ export function crosslinkBody(
   linked: Set<string>,
   max = 20,
   index?: TargetIndex,
+  ceiling = PERSONAL,
 ): { body: string; added: number } {
-  const allowed = (t: LinkTarget) => t.pageId !== selfId && !linked.has(t.pageId);
+  const allowed = (t: LinkTarget) => t.pageId !== selfId && !linked.has(t.pageId) && (t.classification ?? PERSONAL) <= ceiling;
   const candidates = targets.filter(allowed);
   if (!candidates.length) return { body, added: 0 };
   // positions that must not change: code, [[links]], [md](links), ^[citations], headings, callout markers
@@ -407,11 +421,15 @@ export async function crosslinkBatch(
   let added = 0;
   let changed = 0;
   let skipped = 0;
+  const [vault] = await sql<{ dc: number }[]>`select default_classification as dc from vaults where id = ${vaultId}`;
   for (const r of rows) {
     const page = await PageStore.get(sql, r.id);
     if (!page) continue;
     const linked = new Set((await sql<{ dst: string }[]>`select dst_page as dst from links where src_page = ${page.id} and dst_page is not null`).map((x) => x.dst));
-    const out = crosslinkBody(page.body, page.id, targets, linked, 20, index);
+    // no title of a page classified above this one: its classification now, or the one this
+    // write gives it (PageStore.upsert: the vault default when the frontmatter has none)
+    const ceiling = Math.min(page.classification, classificationLevel(page.frontmatter.classification, vault?.dc ?? page.classification));
+    const out = crosslinkBody(page.body, page.id, targets, linked, 20, index, ceiling);
     if (!out.added) continue;
     try {
       await pages.upsert({ vaultId, id: page.id, path: page.path, frontmatter: page.frontmatter, body: out.body, author: "dream:crosslink", ifVersion: page.version });

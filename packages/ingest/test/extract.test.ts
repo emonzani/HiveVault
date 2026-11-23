@@ -153,7 +153,7 @@ describe("compiler, extract mode", () => {
     const vault = await new VaultStore(sql!, 16).create({ kind: "cell", slug: `ex-${run}`, name: "Estrazione" });
 
     const source = async (name: string, date: string, text: string) => {
-      const { source: s } = await store.create(Buffer.from(text), { vaultId: vault.id, name, origin: "upload" });
+      const { source: s } = await store.create(Buffer.from(text), { vaultId: vault.id, name, origin: "upload" }, "system");
       await store.update(s.id, { status: "parsed", level: 1 }, { date });
       await store.writeChunks(s, text, "italian", { minTokens: 1 });
       return (await store.get(s.id))!;

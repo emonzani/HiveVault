@@ -69,19 +69,25 @@ else
   DBPASS=$(rand 24); BKPASS=$(rand 32); MTOKEN=$(rand 32)
   SCHEME=http; [ -n "$CERT" ] && SCHEME=https
   # .env may be a symbolic link to a shared file (scripts/deploy.sh): write through it
-  sed -e "s#^DATABASE_URL=.*#DATABASE_URL=postgres://brain:${DBPASS}@127.0.0.1:5432/brain#" \
-      -e "s#^POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=${DBPASS}#" \
-      -e "s#^HOST=.*#HOST=0.0.0.0#" \
-      -e "s#^PORT=.*#PORT=${PORT}#" \
-      -e "s#^PUBLIC_URL=.*#PUBLIC_URL=${SCHEME}://${HOST}$( [ "$PORT" = 443 ] || echo ":${PORT}")#" \
-      -e "s#^TLS_CERT_FILE=.*#TLS_CERT_FILE=${CERT}#" \
-      -e "s#^TLS_KEY_FILE=.*#TLS_KEY_FILE=${KEY}#" \
-      -e "s#^METRICS_TOKEN=.*#METRICS_TOKEN=${MTOKEN}#" \
-      -e "s#^MODELS_OFFLINE_MODE=.*#MODELS_OFFLINE_MODE=queue#" \
-      -e "s#^PGBACKREST_CIPHER_PASS=.*#PGBACKREST_CIPHER_PASS=${BKPASS}#" \
+  # The sed program and the grep pattern come on stdin (-f -), never in the command line:
+  # every local user can read the arguments of a process (/proc/<pid>/cmdline).
+  sed -f - \
       ${DATA_DIR:+-e "s#^DATA_DIR=.*#DATA_DIR=${DATA_DIR}#"} \
-      .env.example > .env
-  grep -q "^PGBACKREST_CIPHER_PASS=${BKPASS}" .env || fail ".env senza passphrase dei backup"
+      .env.example > .env <<EOF
+s#^DATABASE_URL=.*#DATABASE_URL=postgres://brain:${DBPASS}@127.0.0.1:5432/brain#
+s#^POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=${DBPASS}#
+s#^HOST=.*#HOST=0.0.0.0#
+s#^PORT=.*#PORT=${PORT}#
+s#^PUBLIC_URL=.*#PUBLIC_URL=${SCHEME}://${HOST}$( [ "$PORT" = 443 ] || echo ":${PORT}")#
+s#^TLS_CERT_FILE=.*#TLS_CERT_FILE=${CERT}#
+s#^TLS_KEY_FILE=.*#TLS_KEY_FILE=${KEY}#
+s#^METRICS_TOKEN=.*#METRICS_TOKEN=${MTOKEN}#
+s#^MODELS_OFFLINE_MODE=.*#MODELS_OFFLINE_MODE=queue#
+s#^PGBACKREST_CIPHER_PASS=.*#PGBACKREST_CIPHER_PASS=${BKPASS}#
+EOF
+  grep -q -f - .env <<EOF || fail ".env senza passphrase dei backup"
+^PGBACKREST_CIPHER_PASS=${BKPASS}
+EOF
   grep -q '^PORT=' .env || echo "PORT=${PORT}" >> .env
   chmod 600 "$(readlink -f .env)"
   echo ".env scritto con segreti casuali (permessi 600)"

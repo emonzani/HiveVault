@@ -69,7 +69,7 @@ Conseguenze che guidano tutto il piano:
 | ID | Requisito | Note di analisi |
 |---|---|---|
 | F1 | L'amministratore crea e gestisce (CRUD) account utente e account API | Account API = identità non umane con scope, vault consentiti, clearance, scadenza. |
-| F2 | Accesso via **TOTP**, **passkey** o **challenge** | TOTP = RFC 6238 (app authenticator); passkey = WebAuthn; challenge = **firma** di `{username, nonce, ts}` con la chiave privata o il certificato dell'utente (Ed25519 / ECDSA P-256 / X.509). Il "nome utente cifrato dalla chiave" si implementa come firma: prova il possesso della chiave e il nonce monouso impedisce il replay. |
+| F2 | Accesso via **TOTP**, **passkey** o **challenge** | TOTP = RFC 6238 (app authenticator); passkey = WebAuthn; challenge = **firma** di `{origine del server, username, nonce, ts}` con la chiave privata o il certificato dell'utente (Ed25519 / ECDSA P-256 / X.509). Il "nome utente cifrato dalla chiave" si implementa come firma: prova il possesso della chiave, il nonce monouso impedisce il replay e l'origine impedisce che un altro server inoltri la firma. |
 | F3 | CRUD completa dell'intero sistema per l'admin | Utenti, account API, celle, spazi, permessi, sorgenti, pagine, job, import, modelli, impostazioni, audit. |
 | F4 | Dashboard tematiche in stile Grafana | Griglia di pannelli, intervallo di tempo, refresh, variabili, drill-down; `/metrics` Prometheus. |
 | F5 | Temi UI | `notte`, `carta`, `ufficio`, `colorato` (§9.1). |
@@ -165,7 +165,7 @@ flowchart LR
 | Database | **PostgreSQL 17 + pgvector ≥ 0.8** | Scala TB, `halfvec`, HNSW con iterative index scan (filtri + vettori), FTS integrato, partizioni, RLS, `SKIP LOCKED` per le code, `LISTEN/NOTIFY`. |
 | Accesso al DB | `postgres` (porsager) + SQL esplicito, migrazioni con un runner interno (file SQL numerati, checksum, advisory lock) | Query ottimizzabili a mano; nessun ORM tra noi e gli indici. |
 | Pool | `pgbouncer` (transaction mode) | Migliaia di richieste brevi senza esaurire le connessioni. |
-| Raw store | filesystem locale content-addressed (`ab/cd/<sha256>`), interfaccia `BlobStore` | Semplice e veloce; un'implementazione S3-compatibile locale (es. Garage/SeaweedFS) si aggiunge dietro la stessa interfaccia se servono più nodi. |
+| Raw store | filesystem locale content-addressed: l'indirizzo è lo `sha256` del contenuto (database e interfaccia `BlobStore`), il nome del file è `k/ab/cd/<HMAC-SHA256(chiave dei nomi del vault, sha256)>`. I file con il nome delle versioni precedenti (`ab/cd/<sha256>`) cambiano nome al primo avvio del server: il cambio è senza ritorno, le versioni precedenti non leggono i nomi nuovi | Semplice e veloce; senza la chiave, una copia dei file non mostra quali documenti noti contiene; un'implementazione S3-compatibile locale (es. Garage/SeaweedFS) si aggiunge dietro la stessa interfaccia se servono più nodi. |
 | Modelli | llama-server OpenAI-compatibile (§2.4) | — |
 | Frontend | **Svelte 5 + Vite + TypeScript** | Deciso (D3). |
 | Editor | **CodeMirror 6** con live preview | Come Obsidian. |
@@ -575,7 +575,7 @@ Resource: `brain://<vault>/index`, `brain://<vault>/page/<id>`, `brain://<vault>
 |---|---|---|
 | **TOTP** | username → codice a 6 cifre (app authenticator) | Segreto cifrato a riposo; finestra ±1 step; codice non riutilizzabile nello stesso step; 10 codici di recupero monouso; blocco progressivo dopo tentativi falliti. Registrazione via QR mostrato una volta. |
 | **Passkey** | WebAuthn (discoverable credentials) | Più passkey per utente; RP ID = dominio del server; richiede HTTPS (CA locale: `scripts/dev-ca.sh`). |
-| **Challenge** | `GET /auth/challenge` → nonce (32 B, TTL 60 s, monouso) → firma di `cb-auth-v1\|username\|nonce\|ts` → `POST /auth/challenge` | Ed25519 / ECDSA P-256 o certificato X.509 della CA interna (catena + revoca). Per edge e script; CLI `cb login --key`. |
+| **Challenge** | `GET /auth/challenge` → nonce (32 B, TTL 60 s, monouso) → firma di `cb-auth-v2\|origine\|username\|nonce\|ts` → `POST /auth/challenge` | Ed25519 / ECDSA P-256 o certificato X.509 della CA interna (catena + revoca). Per edge e script; CLI `cb login --key`. L'origine (`schema://host[:porta]`) è quella dell'URL che il client usa, presa dalla sua configurazione e mai dal server. Il server accetta solo le sue origini (`PUBLIC_URL`, `WEBAUTHN_EXTRA_ORIGINS`): una firma fatta per un altro server non vale. Il messaggio vecchio `cb-auth-v1` riceve l'errore `signature_outdated`, un'origine non accettata (campo `origin`) riceve `origin_mismatch`: nessuna sessione, nessun conteggio per il blocco. |
 | **Account API** | API key `cb_<id>_<secret>` (hash salato) oppure challenge con chiave | Scope (`read`, `write`, `ingest`, `admin`), vault consentiti, clearance, scadenza, rate limit, IP consentiti. |
 
 Il primo admin si crea da CLI (`cb admin create`) con registrazione TOTP obbligatoria. Sessioni: token opaco in cookie `HttpOnly; Secure; SameSite=Strict`, rinnovo scorrevole, revoca dall'admin; CSRF token per le modifiche; audit di ogni login.

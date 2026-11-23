@@ -6,7 +6,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { Access, AuthError, type AuthService } from "@cb/auth";
 import { withReader, type PageStore } from "@cb/brain";
 import type { Sql } from "@cb/db";
-import { Curator, CuratorError, DreamBusyError, DreamVaultError, feedsOf, mergePages, renderIndexes, setFeeds, startDream, type DreamTask } from "@cb/hive";
+import { Curator, CuratorError, DreamBusyError, DreamVaultError, feedsOf, mergePages, MergeVisibilityError, renderIndexes, setFeeds, startDream, type DreamTask } from "@cb/hive";
 import type { TaskEngine } from "@cb/tasks";
 import { meta, requireAction, requireAuth, requireUser } from "../http.ts";
 
@@ -38,7 +38,7 @@ export function hiveRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, d:
     try {
       return await fn();
     } catch (e) {
-      if (e instanceof CuratorError) throw new AuthError("invalid_request", e.message);
+      if (e instanceof CuratorError || e instanceof MergeVisibilityError) throw new AuthError("invalid_request", e.message);
       throw e;
     }
   };
@@ -125,7 +125,7 @@ export function hiveRoutes(app: FastifyInstance, sql: Sql, auth: AuthService, d:
         await sql`update curator_items set status = 'superseded' where id = ${it.id} and status = 'open'`;
         throw new AuthError("conflict", "Una delle due pagine non esiste più (già unita o rimossa). La voce è chiusa.");
       }
-      const r = await mergePages(sql, d.pages, req.body.keep, ids.find((x) => x !== req.body.keep)!, `curator:${a.principal.id}`);
+      const r = await wrap(() => mergePages(sql, d.pages, req.body.keep, ids.find((x) => x !== req.body.keep)!, `curator:${a.principal.id}`));
       await d.curator.resolve(it.id, { done: true, note: `unite in ${r.kept}` }, a.principal.id);
       await auth.audit.writeNow({ principalId: a.principal.id, action: "curator.merge", resource: it.id, ...meta(req), data: { kept: r.kept, removed: r.removed } });
       return r;

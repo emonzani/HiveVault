@@ -180,6 +180,15 @@ describe("web interface API", () => {
     const id = created.json().id as string;
     expect((await w.call("POST", `/api/vaults/${v.id}/pages`, { title: `bozza ${run}` })).statusCode).toBe(409);
     expect((await r.call("POST", `/api/vaults/${v.id}/pages`, { title: `Altra ${run}` })).statusCode).toBe(403);
+    // a name of a page above the clearance is still taken, but its title is not shown
+    await pages!.upsert({ vaultId: v.id, markdown: md(`Progetto Phoenix ${run}`, "testo", `classification: segreto\naliases: [Phoenix ${run}]\n`) });
+    const hidden = await w.call("POST", `/api/vaults/${v.id}/pages`, { title: `Phoenix ${run}` });
+    expect(hidden.statusCode).toBe(409);
+    expect(hidden.json().error.message).toBe("Esiste già una pagina con questo nome in questo vault.");
+    const cleared = await user([[v.id, "write"]], 3);
+    const shown = await cleared.call("POST", `/api/vaults/${v.id}/pages`, { title: `Phoenix ${run}` });
+    expect(shown.statusCode).toBe(409);
+    expect(shown.json().error.message).toBe(`Esiste già una pagina "Progetto Phoenix ${run}" in questo vault.`);
 
     const file = (await w.call("GET", `/api/pages/${id}/markdown`)).body;
     expect(file).toContain(`title: Bozza ${run}`);

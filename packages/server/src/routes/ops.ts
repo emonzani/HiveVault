@@ -9,9 +9,10 @@ import path from "node:path";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import JSZip from "jszip";
 import { AuthError, type AuthService } from "@cb/auth";
+import type { BlobStore } from "@cb/blobs";
 import { CheckpointStore, CLASSIFICATIONS, exportVault, importVault, isMassChange, PageStore, PERSONAL, serializeDocument } from "@cb/brain";
 import type { Sql } from "@cb/db";
-import { mergePages } from "@cb/hive";
+import { mergePages, MergeVisibilityError } from "@cb/hive";
 import { gpuSnapshot, hostSnapshot, type Agg, type MetricsService } from "@cb/metrics";
 import { metrics as registry } from "@cb/shared";
 import type { TaskEngine } from "@cb/tasks";
@@ -31,6 +32,8 @@ export interface OpsDeps {
   models?: ModelsAdmin;
   settings: Settings;
   dataDir: string;
+  /** The raw store: a deleted source deletes its unused blobs through it. */
+  blobs: BlobStore;
   /** Prometheus scrapers: `Authorization: Bearer <token>` (empty = administrators only). */
   metricsToken?: string;
   /** The compilation queue with its estimated wait (M14). */
@@ -416,12 +419,11 @@ export function opsRoutes(app: FastifyInstance, d: OpsDeps): void {
     );
     let removed = 0;
     for (const sha of blobs.filter((b) => !used.has(b))) {
-      const file = path.join(d.dataDir, "blobs", vaultId, sha.slice(0, 2), sha.slice(2, 4), sha);
       try {
-        await rm(file, { force: true });
+        await d.blobs.delete(vaultId, sha);
         removed++;
       } catch {
-        /* layout of the blob store may differ: the nightly check reports leftovers */
+        /* a blob that cannot be removed stays: the nightly check reports leftovers */
       }
     }
     await audit(req, "admin.source.delete", req.params.id, { vault: vaultId, name: tree[0]!.name, sources: ids.length, blobs: removed });
@@ -444,6 +446,7 @@ export function opsRoutes(app: FastifyInstance, d: OpsDeps): void {
         await audit(req, "admin.page.merge", r.kept, { removed: r.removed });
         return r;
       } catch (e) {
+        if (e instanceof MergeVisibilityError) throw new AuthError("invalid_request", e.message);
         throw new AuthError("invalid_request", "Le pagine devono esistere ed essere nello stesso vault.");
       }
     },

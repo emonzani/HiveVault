@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -11,7 +12,7 @@ import { parseFile } from "@cb/parsers";
 import { ulid } from "@cb/shared";
 import { TaskEngine } from "@cb/tasks";
 import { generateFormats } from "../../../bench/corpus/formats.ts";
-import { Compiler, defineImportTask, defineIngestTask, globToRegExp, ImportError, ImportService, SourceStore } from "../src/index.ts";
+import { Compiler, defineImportTask, defineIngestTask, globToRegExp, ImportError, ImportService, openImportFile, SourceStore } from "../src/index.ts";
 
 const sql: Sql | undefined = await setupTestDb();
 const run = ulid().slice(-6).toLowerCase();
@@ -26,6 +27,18 @@ await writeFile(path.join(share, "sotto", "~$documento.docx"), "lock file");
 await writeFile(path.join(share, "sotto", "copia.md"), "---\ntitle: x\n---\nduplicato"); // unique content
 await cp(path.join(share, "md", "nota-0.md"), path.join(share, "sotto", "cartella", "nota-0-copia.md")); // same content: duplicate
 await writeFile(path.join(share, "grande.txt"), Buffer.alloc(600 * 1024, 65));
+// a folder outside the import roots, as the files of the server
+const server = path.join(tmp, "server");
+await mkdir(server);
+await writeFile(path.join(server, "notes.txt"), "SERVER SECRET");
+// symlinks can need a privilege on Windows: their tests skip where they cannot be created
+const canLink = (target: string, type: "junction" | "file") =>
+  symlink(target, path.join(tmp, `probe-${type}`), type).then(
+    () => true,
+    () => false,
+  );
+const links = await canLink(server, "junction");
+const fileLinks = await canLink(path.join(server, "notes.txt"), "file");
 
 const store = sql ? new SourceStore(sql, new FsBlobStore(path.join(tmp, "blobs"), randomBytes(32))) : undefined;
 const ingestTask = sql
@@ -77,6 +90,72 @@ describe("globs", () => {
     expect(globToRegExp("archivio/*.eml").test("archivio/sub/x.eml")).toBe(false);
     expect(globToRegExp("bozze/**").test("bozze/a/b.docx")).toBe(true);
     expect(globToRegExp("v?.txt").test("v1.txt")).toBe(true);
+  });
+});
+
+describe("opening a scanned file", () => {
+  const read = async (root: string, rel: string) => {
+    const fh = await openImportFile(root, rel);
+    try {
+      return await fh.readFile("utf8");
+    } finally {
+      await fh.close();
+    }
+  };
+  const folder = async (name: string) => {
+    const d = path.join(tmp, "open", name);
+    await mkdir(path.join(d, "zz"), { recursive: true });
+    await writeFile(path.join(d, "zz", "notes.txt"), "notes");
+    return realpath(d);
+  };
+
+  it("reads a regular file and refuses a folder in its place", async () => {
+    const root = await folder("plain");
+    expect(await read(root, "zz/notes.txt")).toBe("notes");
+    await expect(read(root, "zz")).rejects.toThrow(/not a regular file/);
+  });
+
+  it("reads a root written in another letter case than the folder on disk, where the file system ignores case", async ({ skip }) => {
+    const root = await folder("CaseDir");
+    const other = path.join(path.dirname(root), "casedir");
+    if (!(await stat(other).catch(() => null))) skip();
+    expect(await read(other, "zz/notes.txt")).toBe("notes");
+  });
+
+  it("refuses a file swapped for a symlink to a file outside", async ({ skip }) => {
+    if (!fileLinks) skip();
+    const root = await folder("leaf");
+    await rm(path.join(root, "zz", "notes.txt"));
+    await symlink(path.join(server, "notes.txt"), path.join(root, "zz", "notes.txt"), "file");
+    await expect(read(root, "zz/notes.txt")).rejects.toThrow(/ELOOP|outside the import folder/);
+  });
+
+  it("refuses a file under a folder swapped for a symlink to a folder outside", async ({ skip }) => {
+    if (!links) skip();
+    const root = await folder("dir");
+    await rm(path.join(root, "zz"), { recursive: true });
+    await symlink(server, path.join(root, "zz"), "junction");
+    await expect(read(root, "zz/notes.txt")).rejects.toThrow(/outside the import folder/);
+  });
+
+  it("refuses a root whose parent folder was swapped for a symlink to another share", async ({ skip }) => {
+    if (!links) skip();
+    const shares = path.join(tmp, "open", "shares");
+    for (const [team, text] of [["team-a", "team a"], ["team-b", "HR SECRET"]]) {
+      await mkdir(path.join(shares, team!, "share"), { recursive: true });
+      await writeFile(path.join(shares, team!, "share", "x.txt"), text!);
+    }
+    const root = await realpath(path.join(shares, "team-a", "share"));
+    expect(await read(root, "x.txt")).toBe("team a");
+    await rename(path.join(shares, "team-a"), path.join(shares, "team-a-old"));
+    await symlink(path.join(shares, "team-b"), path.join(shares, "team-a"), "junction");
+    await expect(read(root, "x.txt")).rejects.toThrow(/import folder changed/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a FIFO without waiting for a writer", async () => {
+    const root = await folder("fifo");
+    execFileSync("mkfifo", [path.join(root, "zz", "pipe")]);
+    await expect(read(root, "zz/pipe")).rejects.toThrow(/not a regular file/);
   });
 });
 
@@ -136,6 +215,40 @@ describe("bulk import", () => {
     await expect(imports!.update(job.id, { windowHours: "sempre" })).rejects.toThrow(/Finestra oraria/);
     await expect(imports!.update("imp_nessuno", { compile: false })).rejects.toThrow(/non trovato/);
     await imports!.setStatus(job.id, "cancelled");
+  });
+
+  db()("store phase: a file or a folder swapped for a symlink after the scan is not read", async ({ skip }) => {
+    if (!links) skip();
+    const v = await new VaultStore(sql!, 16).create({ kind: "space", slug: `imp4-${run}`, name: "Import 4" });
+    const root = path.join(allowedRoot, "scambio");
+    await mkdir(path.join(root, "zz"), { recursive: true });
+    await writeFile(path.join(root, "zz", "notes.txt"), "note " + run);
+    await writeFile(path.join(root, "ok.txt"), "ok " + run);
+    // a task the engine does not run: the test runs its phases, with the swap in between
+    const manual = defineImportTask({ sql: sql!, store: store!, ingestTask: ingestTask!, roots: [allowedRoot], name: `import-manual-${run}` });
+    const job = await new ImportService(sql!, engine!, manual, [allowedRoot]).create({ vaultId: v.id, root });
+    const ctx = {
+      task: { input: { jobId: job.id }, state: {} },
+      signal: new AbortController().signal,
+      next: (phase: string, state: unknown) => ({ type: "next", phase, state }),
+      done: (result: unknown) => ({ type: "done", result }),
+      sleepUntil: (until: Date, phase: string, state: unknown) => ({ type: "sleep", until, phase, state }),
+    } as never;
+    expect(await manual.phases.scan!(ctx)).toMatchObject({ type: "next", phase: "store" });
+    await rm(path.join(root, "zz"), { recursive: true });
+    await symlink(server, path.join(root, "zz"), "junction");
+    expect(await manual.phases.store!(ctx)).toMatchObject({ type: "next", phase: "store" });
+    const files = await sql!<{ rel_path: string; status: string; reason: string | null }[]>`
+      select rel_path, status, reason from import_files where job_id = ${job.id} order by rel_path`;
+    expect(files).toMatchObject([
+      { rel_path: "ok.txt", status: "stored" },
+      { rel_path: "zz/notes.txt", status: "error", reason: "the file is outside the import folder" },
+    ]);
+    const paths = await sql!<{ path: string }[]>`select path from sources where vault_id = ${v.id}`;
+    expect(paths.map((p) => p.path)).toEqual(["ok.txt"]);
+    expect(await manual.phases.store!(ctx)).toMatchObject({ type: "done" });
+    await engine!.cancel(job.taskId!);
+    await waitIngest(v.id);
   });
 
   db()("refuses roots outside the allowed import roots", async () => {

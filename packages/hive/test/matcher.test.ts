@@ -76,3 +76,39 @@ describe("crosslink with the automaton", () => {
     expect(fast.added).toBe(1);
   });
 });
+
+describe("crosslink and classification", () => {
+  const { targets } = pickTargets([
+    { id: "p1", title: "Progetto Orione", aliases: null, classification: 0 },
+    { id: "p2", title: "Orbit Analytics", aliases: null, classification: 1 },
+    { id: "s1", title: "Acquisizione Beta S.r.l.", aliases: ["Phoenix"], classification: 3 },
+  ]);
+  const index = targetIndex({ targets, ambiguous: 0 });
+  const link = (body: string, ceiling: number) => {
+    const plain = crosslinkBody(body, "self", targets, new Set(), 20, undefined, ceiling);
+    const fast = crosslinkBody(body, "self", targets, new Set(), 20, index, ceiling);
+    expect(fast).toEqual(plain);
+    return plain;
+  };
+
+  it("never writes the title of a page classified above the page", () => {
+    expect(targets.find((t) => t.name === "Phoenix")).toMatchObject({ title: "Acquisizione Beta S.r.l.", classification: 3 });
+    expect(link("Il progetto Phoenix parte.", 1)).toEqual({ body: "Il progetto Phoenix parte.", added: 0 });
+    expect(link("Visto Acquisizione Beta S.r.l. oggi.", 2)).toEqual({ body: "Visto Acquisizione Beta S.r.l. oggi.", added: 0 });
+    // a page at the same classification links it as before
+    expect(link("Il progetto Phoenix parte.", 3).body).toBe("Il progetto [[Acquisizione Beta S.r.l.|Phoenix]] parte.");
+  });
+
+  it("keeps the links to pages at or below the classification of the page", () => {
+    const body = "Phoenix usa Orbit Analytics nel Progetto Orione.";
+    expect(crosslinkBody(body, "self", targets, new Set()).body).toBe("[[Acquisizione Beta S.r.l.|Phoenix]] usa [[Orbit Analytics]] nel [[Progetto Orione]].");
+    expect(link(body, 1)).toEqual({ body: "Phoenix usa [[Orbit Analytics]] nel [[Progetto Orione]].", added: 2 });
+    expect(link(body, 0)).toEqual({ body: "Phoenix usa Orbit Analytics nel [[Progetto Orione]].", added: 1 });
+  });
+
+  it("a target without a classification is linked only without a ceiling", () => {
+    const t = [{ name: "Progetto Orione", title: "Progetto Orione", pageId: "p1" }];
+    expect(crosslinkBody("Il Progetto Orione.", "self", t, new Set()).added).toBe(1);
+    expect(crosslinkBody("Il Progetto Orione.", "self", t, new Set(), 20, undefined, 3).added).toBe(0);
+  });
+});

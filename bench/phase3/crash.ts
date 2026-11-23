@@ -43,7 +43,7 @@ for (let i = 0; i < N; i++) {
     data = Buffer.from(`# Documento ${i} ${run}\n\n${"Paragrafo del documento con dettagli. ".repeat(20)}\n\n## Seconda parte\n\nAltro testo ${i}.`);
     name = `documento-${i}.md`;
   }
-  const { source } = await s.store.create(data, { vaultId: vault.id, name, origin: "upload", compile: true, priority: 1 });
+  const { source } = await s.store.create(data, { vaultId: vault.id, name, origin: "upload", compile: true, priority: 1 }, "system");
   const t = await submitTask(s.sql, s.ingestTask, { sourceId: source.id }, { requestId: `ingest:${source.id}:${source.sha256}`, priority: 1 });
   await s.sql`update sources set task_id = ${t.id} where id = ${source.id}`;
   ids.push(source.id);

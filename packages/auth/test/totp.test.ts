@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { base32Decode, base32Encode, SecretBox, safeEqual } from "../src/crypto.ts";
+import { base32Decode, base32Encode, KeyedHash, SecretBox, safeEqual, sha256hex } from "../src/crypto.ts";
 import { hotp, otpauthUri, totp, verifyTotp } from "../src/totp.ts";
 import { randomBytes } from "node:crypto";
 
@@ -52,6 +52,16 @@ describe("crypto helpers", () => {
     const sealed = box.seal(Buffer.from("seme"), "usr_1");
     expect(box.open(sealed, "usr_1").toString()).toBe("seme");
     expect(() => box.open(sealed, "usr_2")).toThrow(); // bound to its principal
+  });
+
+  it("keyed hash depends on the master key and the purpose", () => {
+    const key = randomBytes(32);
+    const h = new KeyedHash(key, "recovery");
+    expect(h.hex("usr_1:ABCDEFGH")).toBe(new KeyedHash(key, "recovery").hex("usr_1:ABCDEFGH"));
+    expect(h.hex("usr_1:ABCDEFGH")).toMatch(/^[0-9a-f]{64}$/);
+    expect(h.hex("usr_1:ABCDEFGH")).not.toBe(sha256hex("usr_1:ABCDEFGH"));
+    expect(h.hex("usr_1:ABCDEFGH")).not.toBe(new KeyedHash(randomBytes(32), "recovery").hex("usr_1:ABCDEFGH"));
+    expect(h.hex("usr_1:ABCDEFGH")).not.toBe(new KeyedHash(key, "other").hex("usr_1:ABCDEFGH"));
   });
 
   it("compares in constant time", () => {

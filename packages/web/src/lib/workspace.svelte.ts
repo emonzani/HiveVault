@@ -2,7 +2,7 @@
  * Workspace state: one or two panes side by side, each with tabs; every tab has its own
  * back/forward history (Alt+←/→). The address bar shows the active tab (#/p/<id>, #/cerca?q=…),
  * so a link can be shared and a reload opens the same view. The layout is a per-viewer
- * convenience kept in localStorage.
+ * convenience kept in localStorage under the key of the logged-in principal.
  */
 
 import { ADMIN_SECTIONS, type AdminSection, type View } from "./views.ts";
@@ -24,8 +24,17 @@ export interface Pane {
   active: number;
 }
 
-const KEY = "cb-workspace";
+/** Tabs of one principal: page titles and search queries are theirs, never the next user's. */
+const KEY = "cb-workspace-";
 const MAX_TABS = 20;
+
+// older versions kept the tabs of every user of the browser under one key
+try {
+  localStorage.removeItem("cb-workspace");
+} catch {
+  /* storage unavailable */
+}
+
 let seq = 0;
 const tabId = () => `t${Date.now().toString(36)}${(seq++).toString(36)}`;
 
@@ -142,9 +151,11 @@ function restoreView(v: View): View | null {
   return typeof viewToHash(view) === "string" ? view : null;
 }
 
-function load(): Pane[] {
+const home = (): Pane[] => [{ tabs: [{ id: tabId(), view: { kind: "home" }, title: t("Nuova scheda"), back: [], fwd: [] }], active: 0 }];
+
+function load(owner: string): Pane[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(KEY + owner);
     if (raw) {
       const panes = JSON.parse(raw) as Pane[];
       if (Array.isArray(panes) && panes.length >= 1 && panes.length <= 2 && panes.every((p) => Array.isArray(p.tabs) && p.tabs.length)) {
@@ -165,12 +176,32 @@ function load(): Pane[] {
   } catch {
     /* storage unavailable or corrupt: start clean */
   }
-  return [{ tabs: [{ id: tabId(), view: { kind: "home" }, title: t("Nuova scheda"), back: [], fwd: [] }], active: 0 }];
+  return home();
 }
 
 class Workspace {
-  panes = $state<Pane[]>(load());
+  panes = $state<Pane[]>(home());
   focused = $state(0);
+  /** Principal whose tabs are saved: null while nobody is logged in. */
+  private owner: string | null = null;
+  /** Principal whose tabs the panes hold: they stay in memory, unsaved, through a logout. */
+  private holder: string | null = null;
+
+  /**
+   * The logged-in principal, or null after a logout or an expired session. The shell is not
+   * shown while logged out, so the panes stay: the same user who logs in again finds tabs,
+   * history and focus unchanged. Another user gets their own saved tabs, never these.
+   */
+  setOwner(id: string | null) {
+    this.owner = id;
+    if (id === null || id === this.holder) return;
+    // the address still shows the previous user's active view: it was not chosen by this user
+    const left = this.holder === null ? null : viewToHash(this.tab.view);
+    this.holder = id;
+    this.panes = load(id);
+    this.focused = 0;
+    if (left !== null && location.hash === left) history.replaceState(null, "", viewToHash(this.tab.view));
+  }
 
   get pane(): Pane {
     return this.panes[Math.min(this.focused, this.panes.length - 1)]!;
@@ -180,8 +211,9 @@ class Workspace {
   }
 
   private save() {
+    if (this.owner === null) return;
     try {
-      localStorage.setItem(KEY, JSON.stringify(this.panes.map((p) => ({ active: p.active, tabs: p.tabs.map((t) => ({ id: t.id, view: t.view, title: t.title })) }))));
+      localStorage.setItem(KEY + this.owner, JSON.stringify(this.panes.map((p) => ({ active: p.active, tabs: p.tabs.map((t) => ({ id: t.id, view: t.view, title: t.title })) }))));
     } catch {
       /* ignore */
     }

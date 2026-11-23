@@ -74,7 +74,7 @@ afterAll(async () => {
 });
 const db = () => (sql ? it : it.skip);
 
-async function account(scopes: ("read" | "write")[], vaultIds: string[], clearance: number) {
+async function account(scopes: ("read" | "write" | "projects")[], vaultIds: string[], clearance: number) {
   const p = await auth!.principals.createApiAccount({ name: `mcp-${run}-${Math.random().toString(36).slice(2, 6)}`, scopes, clearance });
   for (const v of vaultIds) await auth!.access.grant(p.id, v, scopes.includes("write") ? "write" : "read", null);
   const { key } = await auth!.apiKeys.issue(p.id);
@@ -171,12 +171,31 @@ describe("MCP server", () => {
     expect(audit.some((x) => x.resource === ris.page.id)).toBe(false);
 
     // write account: capture into the inbox; proposals wait for a person
-    const { client: writer } = await account(["read", "write"], [v.id], 1);
+    const { id: writerId, client: writer } = await account(["read", "write"], [v.id], 1);
     const saved = text(await writer.callTool({ name: "brain_capture", arguments: { title: `Sintesi ${run}`, content: `Acme ha 120 postazioni ^[${acme.page.id}].`, vault: `mcpv-${run}` } }));
     expect(saved).toMatch(/Nota salvata: \[pag_/);
-    const [note] = await sql!<{ path: string; type: string; frontmatter: { captured_by: string } }[]>`select path, type, frontmatter from pages where vault_id = ${v.id} and title = ${`Sintesi ${run}`}`;
+    const capturedId = (t: string) => /Nota salvata: \[(pag_[0-9A-Z]+)\]/.exec(t)![1]!;
+    const [note] = await sql!<{ title: string; path: string; type: string; frontmatter: { captured_by: string } }[]>`select title, path, type, frontmatter from pages where id = ${capturedId(saved)}`;
     expect(note).toMatchObject({ type: "note/capture" });
-    expect(note!.path).toMatch(/^inbox\//);
+    expect(note!.title).toMatch(new RegExp(`^Sintesi ${run} \\(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}\\)$`));
+    expect(note!.path).toMatch(/^inbox\/\d{4}-\d{2}-\d{2}-sintesi-.+-[0-9a-z]{6}\.md$/);
+    // the reply does not depend on pages above the clearance: a name used only by a "segreto"
+    // page gives the same reply as an unused name, and the hidden page stays as it was
+    const secret = (await PageStore.resolve(sql!, [v.id], `Segreto ${run}`))[0]!;
+    const shape = (t: string, name: string) => t.replace(/\[pag_[0-9A-Z]+\]/, "[id]").replace(new RegExp(`«${name} \\(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}\\)»`), "«…»");
+    const onHidden = text(await writer.callTool({ name: "brain_capture", arguments: { title: `Segreto ${run}`, content: "Una nota.", vault: `mcpv-${run}`, compile: false } }));
+    const onUnused = text(await writer.callTool({ name: "brain_capture", arguments: { title: `Libero ${run}`, content: "Una nota.", vault: `mcpv-${run}`, compile: false } }));
+    expect(shape(onHidden, `Segreto ${run}`)).toContain("«…»");
+    expect(shape(onHidden, `Segreto ${run}`)).toBe(shape(onUnused, `Libero ${run}`));
+    expect(capturedId(onHidden)).not.toBe(secret.id);
+    const secretAfter = (await PageStore.get(sql!, secret.id))!;
+    expect(secretAfter).toMatchObject({ title: secret.title, path: secret.path, version: secret.version, hash: secret.hash, classification: 3 });
+    // the same name twice: two notes, never one replaced
+    const twice: string[] = [];
+    for (let i = 0; i < 2; i++) twice.push(text(await writer.callTool({ name: "brain_capture", arguments: { title: `Doppia ${run}`, content: `Nota ${i}.`, vault: `mcpv-${run}`, compile: false } })));
+    const doubles = await sql!<{ id: string; path: string }[]>`select id, path from pages where vault_id = ${v.id} and title like ${`Doppia ${run} (%`}`;
+    expect(new Set(doubles.map((d) => d.id))).toEqual(new Set(twice.map(capturedId)));
+    expect(new Set(doubles.map((d) => d.path)).size).toBe(2);
 
     // work journal: hooked to real pages only, in the inbox; the day lists its sessions
     const journal = (args: Record<string, unknown>) => writer.callTool({ name: "brain_journal", arguments: { vault: `mcpv-${run}`, ...args } });
@@ -215,6 +234,20 @@ describe("MCP server", () => {
     const after = (await PageStore.get(sql!, acme.page.id))!;
     expect(after.body).toContain("Postazioni: 150");
     expect(after.body).toContain("## Timeline");
+
+    // a proposal goes only into a vault the key may write: not into a vault it only reads
+    const propose = (c: Client) => c.callTool({ name: "brain_propose_edit", arguments: { page: `Fuori ${run}`, markdown: "# Fuori\n\nTesto cambiato.", rationale: "Prova di scrittura" } });
+    await auth!.access.grant(writerId, other.id, "read", null);
+    const readOnly = await propose(writer);
+    expect(readOnly.isError).toBe(true);
+    expect(text(readOnly)).toMatch(/non è scrivibile/);
+    // "projects" writes project vaults only: a write grant on another vault stays read
+    const { id: projId, client: proj } = await account(["read", "projects"], [], 1);
+    await auth!.access.grant(projId, other.id, "write", null);
+    const capped = await propose(proj);
+    expect(capped.isError).toBe(true);
+    expect(text(capped)).toMatch(/non è scrivibile/);
+    expect(await curator.list([other.id], { kind: "proposal" })).toEqual([]);
   });
 
   db()("only API accounts with a key; GET is not allowed", async () => {
@@ -238,7 +271,7 @@ describe("documents newer than the pages (M15, M16, M17)", () => {
     // a document written after the page, not compiled, that names its subject
     const store = new SourceStore(sql!, new FsBlobStore(await mkdtemp(path.join(os.tmpdir(), "cb-mcp-")), randomBytes(32)));
     const text1 = `# Rinnovo\n\nDelta ${run} S.p.A. passa a 450 postazioni dal primo gennaio.`;
-    const { source } = await store.create(Buffer.from(text1), { vaultId: v.id, name: "rinnovo.md", origin: "upload", classification: 1 });
+    const { source } = await store.create(Buffer.from(text1), { vaultId: v.id, name: "rinnovo.md", origin: "upload", classification: 1 }, "system");
     await store.update(source.id, { status: "indexed", level: 1 });
     await store.writeChunks((await store.get(source.id))!, text1, "italian", { minTokens: 1 });
 

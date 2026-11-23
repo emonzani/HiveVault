@@ -116,7 +116,7 @@ describe("OCR text", () => {
 describe("OCR in the ingestion pipeline", () => {
   db()("reads the scanned pages of a PDF in groups and keeps the text layer of the others", async () => {
     const v = await new VaultStore(sql!, DIMS).create({ kind: "cell", slug: `ocr-pdf-${run}`, name: "ocr" });
-    const r = await service!.upload(v.id, await scannedPdf(), "scansione.pdf", null);
+    const r = await service!.upload(v.id, await scannedPdf(), "scansione.pdf", null, "system");
     await settle(v.id);
     const s = (await store!.get(r.source.id))!;
     expect(s).toMatchObject({ level: 2, status: "embedded" });
@@ -136,7 +136,7 @@ describe("OCR in the ingestion pipeline", () => {
   db()("reads a photo, and waits while the OCR model does not answer", async () => {
     const v = await new VaultStore(sql!, DIMS).create({ kind: "cell", slug: `ocr-img-${run}`, name: "ocr" });
     ocrEndpoint.up = false;
-    const r = await service!.upload(v.id, PNG, "lavagna.png", null);
+    const r = await service!.upload(v.id, PNG, "lavagna.png", null, "system");
     // the task sleeps in the OCR phase instead of failing
     for (let i = 0; i < 50; i++) {
       const [t] = await sql!<{ phase: string; status: string }[]>`select t.phase, t.status from tasks t join sources s on s.task_id = t.id where s.id = ${r.source.id}`;
@@ -160,7 +160,7 @@ describe("OCR in the ingestion pipeline", () => {
     c2.getContext("2d").fillRect(1, 1, 9, 9);
     const img = c2.toBuffer("image/png");
     refuseBytes = img.length;
-    const r = await service!.upload(v.id, img, "illeggibile.png", null);
+    const r = await service!.upload(v.id, img, "illeggibile.png", null, "system");
     // retries wait 1 s, 2 s: bring them forward
     for (let i = 0; i < 100; i++) {
       await sql!`update tasks set run_after = now() where id = (select task_id from sources where id = ${r.source.id}) and status = 'queued'`;

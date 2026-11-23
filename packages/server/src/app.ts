@@ -48,7 +48,8 @@ export interface AppDeps {
   secureCookies: boolean;
   rateLimitPerMin?: number;
   loginRateLimitPerMin?: number;
-  trustProxy?: boolean;
+  /** Addresses (IP or CIDR) of the reverse proxies in front of the server (TRUST_PROXY); empty = no proxy. */
+  trustProxy?: string[];
   logger?: boolean;
   https?: { cert: Buffer; key: Buffer } | null;
   /** Built web app (packages/web/dist): served at / with a fallback to index.html. */
@@ -59,7 +60,8 @@ export interface AppDeps {
 export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: d.logger ?? false,
-    trustProxy: d.trustProxy ?? false,
+    // only the listed proxies: req.ip is the rightmost X-Forwarded-For address that is not one of them
+    trustProxy: d.trustProxy?.length ? d.trustProxy : false,
     bodyLimit: 2 * 1024 * 1024,
     ...(d.https ? { https: d.https } : {}),
     ajv: { customOptions: { removeAdditional: false, coerceTypes: "array", allErrors: false } },
@@ -84,7 +86,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   adminRoutes(app, d.auth, d.vaults, d.ops ? () => d.ops!.settings.get("defaults").classification : undefined, d.ingest);
   brainRoutes(app, d.sql, d.auth, d.search, d.ingest);
   workspaceRoutes(app, d.sql, d.auth);
-  projectRoutes(app, d.sql, d.auth, d.vaults);
+  projectRoutes(app, d.sql, d.auth, d.vaults, d.ingest);
   if (d.hive) hiveRoutes(app, d.sql, d.auth, d.hive);
   if (d.mcp) mcpRoutes(app, { sql: d.sql, auth: d.auth, search: d.search, ...(d.ingest ? { ingest: d.ingest } : {}), ...d.mcp });
   if (d.ops) opsRoutes(app, { sql: d.sql, auth: d.auth, ...d.ops, ...(d.ingest ? { queue: () => d.ingest!.compileQueue() } : {}) });

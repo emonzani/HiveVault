@@ -144,7 +144,9 @@ export class IngestService {
    */
   async refresh(sourceId: string): Promise<"same" | "changed" | "failed" | "skipped"> {
     const src = await this.store.get(sourceId);
-    if (!src || src.origin !== "link" || !src.path || src.parentId || src.meta.replacedBy) return "skipped";
+    if (!src || src.origin !== "link" || !src.path || src.parentId) return "skipped";
+    // replaced by a newer download that still exists: that one is checked instead
+    if (typeof src.meta.replacedBy === "string" && (await this.store.get(src.meta.replacedBy))) return "skipped";
     const running = await this.sql`select 1 from tasks where id = ${src.taskId} and status not in ('done', 'failed', 'cancelled')`;
     if (running.length) return "skipped";
     const checkedAt = new Date().toISOString();
@@ -157,7 +159,7 @@ export class IngestService {
       return "failed";
     }
     if (createHash("sha256").update(f.data).digest("hex") === src.sha256) {
-      await this.sql`update sources set meta = (meta - 'refreshError') || ${this.sql.json({ checkedAt } as never)} where id = ${src.id}`;
+      await this.sql`update sources set meta = (meta - 'refreshError' - 'replacedBy') || ${this.sql.json({ checkedAt } as never)} where id = ${src.id}`;
       return "same";
     }
     const { source, created } = await this.store.create(
@@ -178,6 +180,9 @@ export class IngestService {
     );
     if (source.id === src.id) return "same";
     if (created) await this.start(source, 2);
+    // an older download with the same bytes is current again: without this, the two sources
+    // would replace each other and the cleanup would delete both
+    else await this.sql`update sources set meta = (meta - 'replacedBy' - 'keep' - 'refreshError') || ${this.sql.json({ checkedAt } as never)} where id = ${source.id}`;
     await this.sql`update sources set meta = (meta - 'refreshError') || ${this.sql.json({ checkedAt, replacedBy: source.id } as never)} where id = ${src.id}`;
     await this.store.log(src.vaultId, "refresh", `Nuova versione: ${src.title ?? src.name}`, source.id, { previous: src.id }, src.classification);
     log.info("link changed", { source: src.id, next: source.id });
@@ -336,15 +341,18 @@ export class IngestService {
         if (await pages.delete(p.page.id)) deleted++;
         continue;
       }
-      const sources = Array.isArray(p.page.frontmatter.sources) ? (p.page.frontmatter.sources as unknown[]).map(String).filter((s) => !idSet.has(s)) : null;
-      const frontmatter = { ...p.page.frontmatter, ...(sources ? { sources } : {}) };
-      // a concurrent writer wins: the strip runs again on its text
+      // a concurrent writer wins: the strip runs again on its text and frontmatter
       for (let attempt = 0; ; attempt++) {
         const cur = attempt ? await PageStore.get(this.sql, p.page.id) : p.page;
         if (!cur) break;
-        const body = attempt ? stripSources(cur.body, idSet).body : p.body;
+        const s = attempt ? stripSources(cur.body, idSet) : null;
+        if (s && s.remaining === 0 && COMPILED_KINDS.has(cur.type.split("/")[0]!)) {
+          if (await pages.delete(cur.id)) deleted++;
+          break;
+        }
+        const sources = Array.isArray(cur.frontmatter.sources) ? (cur.frontmatter.sources as unknown[]).map(String).filter((x) => !idSet.has(x)) : null;
         try {
-          await pages.upsert({ vaultId: cur.vaultId, id: cur.id, path: cur.path, frontmatter: attempt ? { ...cur.frontmatter, ...(sources ? { sources } : {}) } : frontmatter, body, author, ifVersion: cur.version });
+          await pages.upsert({ vaultId: cur.vaultId, id: cur.id, path: cur.path, frontmatter: { ...cur.frontmatter, ...(sources ? { sources } : {}) }, body: s?.body ?? p.body, author, ifVersion: cur.version });
           rewritten++;
           break;
         } catch (e) {

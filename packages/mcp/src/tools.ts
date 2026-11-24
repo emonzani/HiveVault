@@ -517,7 +517,7 @@ async function gatherContext(ctx: ToolContext, queries: string[], vaults: string
   for (const q of queries) {
     const r = await brainSearchRaw(ctx, { query: q, ...(vaults ? { vaults } : {}), limit: 6, max_tokens: 4000 });
     for (const h of r.hits) {
-      if (used > budget) break;
+      if (used >= budget) break;
       if (seen.has(h.id)) continue;
       seen.add(h.id);
       if (h.kind === "page") {
@@ -708,14 +708,16 @@ async function writableVault(ctx: ToolContext, ref?: string): Promise<{ id: stri
  * answers with its broken links): `[[names]]` no readable page has, `^[ids]` of no readable
  * document or page. Checked at once, not at the next nightly cycle.
  */
-export async function checkRefs(ctx: ToolContext, text: string, vaults?: string[]): Promise<{ links: string[]; citations: string[] }> {
-  const p = readerOf(ctx, vaults);
+export async function checkRefs(ctx: ToolContext, text: string, linkVaults?: string[]): Promise<{ links: string[]; citations: string[] }> {
+  // a [[link]] resolves only in the vault of its page; a citation may name any readable vault
+  const p = readerOf(ctx);
+  const own = linkVaults ? p.vaults.filter((v) => linkVaults.includes(v)) : p.vaults;
   const names = [...new Set(extractWikilinks(text).map((l) => l.target.trim()).filter(Boolean))].slice(0, 50);
   const refs = [...new Set(extractCitations(text).map((c) => c.source))].slice(0, 100);
   if (!p.vaults.length || (!names.length && !refs.length)) return { links: [], citations: [] };
   return withReader(ctx.sql, p, async (tx) => {
     const links: string[] = [];
-    for (const n of names) if (!(await PageStore.resolve(tx, p.vaults, n)).length) links.push(n);
+    for (const n of names) if (!(await PageStore.resolve(tx, own, n)).length) links.push(n);
     const known = refs.length
       ? new Set(
           (
@@ -775,7 +777,7 @@ export async function brainCapture(
     author: ctx.account.id,
   });
   await ctx.audit?.writeNow({ principalId: ctx.account.id, action: "mcp.capture", resource: r.page.id, ...ctx.meta, data: { vault: v.id, tokens: r.page.tokens } });
-  const refs = refsNote(await checkRefs(ctx, body));
+  const refs = refsNote(await checkRefs(ctx, body, [v.id]));
   return `Nota salvata: [${r.page.id}] «${finalTitle}» nel vault ${v.name} (\`${v.slug}\`), cartella inbox. Le persone la vedono nell'interfaccia; il ciclo notturno la collega alle altre pagine.${refs}`;
 }
 
@@ -802,7 +804,7 @@ async function captureAsSource(
   // the same text as a document this account may not read: nothing about it
   if (!r.source) return `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`). Nessun nuovo invio.`;
   return r.created
-    ? `Nota inviata all'ingestion: documento [${r.source.id}] «${r.source.name}» nel vault ${v.name} (\`${v.slug}\`). HiveVault la indicizza e la compila in pagine con citazioni; il ciclo notturno la collega al resto.${refsNote(await checkRefs(ctx, body))}`
+    ? `Nota inviata all'ingestion: documento [${r.source.id}] «${r.source.name}» nel vault ${v.name} (\`${v.slug}\`). HiveVault la indicizza e la compila in pagine con citazioni; il ciclo notturno la collega al resto.${refsNote(await checkRefs(ctx, body, [v.id]))}`
     : `La stessa nota è già nel vault ${v.name} (\`${v.slug}\`): documento [${r.source.id}] «${r.source.name}». Nessun nuovo invio.`;
 }
 

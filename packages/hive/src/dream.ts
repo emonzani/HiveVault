@@ -425,9 +425,9 @@ export const STEPS: Step[] = [
       const due = new Date(t.getTime() - days * 86400_000).toISOString();
       // the oldest check first; a link never checked counts from its download
       const rows = await deps.sql<{ id: string }[]>`
-        select id from sources
+        select id from sources s
         where vault_id = ${vaultId} and origin = 'link' and parent_id is null and path is not null
-          and not (meta ? 'replacedBy') and status not in ('failed', 'unsupported')
+          and not exists (select 1 from sources n where n.id = s.meta->>'replacedBy') and status not in ('failed', 'unsupported')
           and coalesce(meta->>'checkedAt', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) < ${due}
         order by coalesce(meta->>'checkedAt', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')), id
         limit ${deps.linkRefreshPerNight ?? 20}`;

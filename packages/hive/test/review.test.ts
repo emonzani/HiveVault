@@ -57,11 +57,13 @@ describe("link refresh step", () => {
     const add = async (id: string, checked: string | null, extra: Record<string, unknown> = {}) =>
       sql!`insert into sources (id, vault_id, sha256, name, mime, size, origin, path, meta, created_at)
            values (${id}, ${v.id}, ${ulid()}, 'x.html', 'text/html', 1, 'link', 'https://example.com/x', ${sql!.json({ ...(checked ? { checkedAt: checked } : {}), ...extra } as never)}, now() - interval '30 days')`;
-    const ids = { old: `src_${ulid()}`, recent: `src_${ulid()}`, never: `src_${ulid()}`, replaced: `src_${ulid()}` };
+    const ids = { old: `src_${ulid()}`, recent: `src_${ulid()}`, never: `src_${ulid()}`, replaced: `src_${ulid()}`, orphan: `src_${ulid()}` };
     await add(ids.old, "2026-01-01T00:00:00Z");
     await add(ids.recent, new Date().toISOString());
     await add(ids.never, null);
     await add(ids.replaced, "2020-01-01T00:00:00Z", { replacedBy: ids.old });
+    // its newer download was deleted: the link is checked again, not frozen
+    await add(ids.orphan, "2025-06-01T00:00:00Z", { replacedBy: `src_${ulid()}` });
     const seen: string[] = [];
     const step = STEPS.find((s) => s.name === "refresh")!;
     const deps: DreamDeps = {
@@ -72,8 +74,8 @@ describe("link refresh step", () => {
       dropReplaced: async () => 1,
     };
     const out = await step.run({ deps, vaultId: v.id, kind: "cell", cursor: null, since: null, signal: new AbortController().signal, night: "2026-11-23" });
-    expect(seen).toEqual([ids.old, ids.never]);
-    expect(out.report).toMatchObject({ uguali: 1, cambiati: 1, "versioni vecchie eliminate": 1 });
+    expect(seen).toEqual([ids.orphan, ids.old, ids.never]);
+    expect(out.report).toMatchObject({ uguali: 2, cambiati: 1, "versioni vecchie eliminate": 1 });
     // 0 days: the step does nothing
     const off = await step.run({ deps: { ...deps, linkRefreshDays: 0 }, vaultId: v.id, kind: "cell", cursor: null, since: null, signal: new AbortController().signal, night: "2026-11-23" });
     expect(off.report).toMatchObject({ saltato: "non configurato" });

@@ -10,48 +10,6 @@ The project follows the LLM-Wiki pattern. Durable tasks, workflows and the wiki 
 - Rules for coding agents: [AGENTS.md](AGENTS.md)
 - Phase reports: [docs/spikes/](docs/spikes/); screens of the web app: [docs/ui/](docs/ui/)
 
-## Status
-
-Phases 0–8 of the [development plan](docs/PIANO_DI_SVILUPPO.md) are complete. The 24-hour continuous ingestion test of phase 8 is not done yet.
-
-| Part | Status |
-|---|---|
-| Monorepo, TypeScript, tests | Done |
-| PostgreSQL 17 + pgvector (Docker Compose), migrations | Done |
-| Model dispatcher (priorities, aging, local and remote endpoints, identity check), mock models | Done |
-| Supervisor of local llama-server processes | Done |
-| Durable task engine on Postgres | Done |
-| Synthetic corpus with ground truth | Done |
-| Themes, kitchen sink (Svelte 5) | Done |
-| Encrypted raw store | Done |
-| Vaults with chunk partitions, Row Level Security | Done |
-| Pages: versions, aliases, blocks, links, structural chunks | Done |
-| Embedding indexer with dedup | Done |
-| Hybrid search (full-text + vectors + titles, RRF), budgeted reading, graph | Done |
-| Obsidian export / import | Done |
-| Login: TOTP, passkeys, signature (Ed25519 / P-256 / X.509), recovery codes | Done |
-| API accounts with keys, scopes, clearance, IP allow-list | Done |
-| Sessions, CSRF, lockout, rate limit, audit log | Done |
-| Admin API (users, API accounts, credentials, vaults, grants, sessions, audit), read API | Done |
-| Local parsers: PDF, DOCX, XLSX, PPTX, CSV, EML, MSG, MBOX, HTML, ZIP, code, text (images: OCR not configured) | Done |
-| Ingestion pipeline I1/I2/I3 (durable), attachments as child sources, compile on demand | Done |
-| Compiler: extractive source page + model agent with cited pages | Done |
-| Upload, links (SSRF check), server-sent events, bulk import from folders | Done |
-| Outgoing network guard | Done |
-| Web app: login (TOTP, passkey, recovery code, activation), tabs and split panes, command palette and quick switcher | Done |
-| Reading with wikilinks, citations, hover previews, backlinks and unlinked mentions, outline, properties, history with diff | Done |
-| Markdown editor with [[link]] completion and live preview; faceted search; global and local graph; source view | Done |
-| Upload with live status (server-sent events), inbox, review queue, cloud agent notice and "Cosa ha letto l'agente cloud" | Done |
-| Hive: claims from the compiled truth, promotion of cells into spaces with provenance, conflicts, curator queue | Done |
-| Dream cycle: 12 steps per vault and night, night window, budget, resume the next night, report | Done |
-| Local embedding and reranker models (llama-server on CPU, supervised) | Done |
-| MCP server for the cloud agent (10 tools, resources, prompts; never above "interno"; reads audited) | Done |
-| Skills and agent plugin, `llms.txt` | Done |
-| Retrieval eval on the synthetic corpus | Done |
-| Admin console and dashboards (metrics, models, settings, operations) | Done |
-| Hardening: load tests, verified backup restore (pgBackRest), OWASP ASVS L2 review, guides, install script | Done |
-| Privacy: "personale" level, teams, account deletion, rectification, append-only audit log with hash chain | Done |
-
 ## Cloud agent
 
 A cloud agent reads the company memory through the MCP server at `POST /mcp` with an API key (streamable HTTP). In an agent client with plugins, install the plugin of this repository (MCP server + skills): see [skills/README.md](skills/README.md). For the development server, `scripts/seed-demo.ts` writes a key of the account `agent-demo` in `data/dev-demo.json`. Configure the MCP client with:
@@ -140,30 +98,6 @@ In production the server serves the built app (`npm run web:build`, `WEB_DIR=pac
 | `npx tsx bench/phase3/crash.ts 60 2 1500` | Ingestion and compilation with worker kills |
 | `npx tsx bench/phase3/import.ts 1000000 2 60 --ingest-wait` | Bulk import of N synthetic files with progress |
 | `npm run spike:c2 -- --target paradedb` | Full-text: tsvector vs ParadeDB (needs `docker compose --profile spikes up -d paradedb`) |
-
-## Layout
-
-```
-packages/shared   config, ids, token estimate, logger
-packages/db       Postgres client, migrations
-packages/models   model dispatcher, llama-server and mock providers, local process supervisor
-packages/tasks    durable task engine
-packages/blobs    encrypted raw store
-packages/brain    memory engine: vaults, pages, chunks, embeddings, search, reading
-packages/auth     authentication, authorization, audit
-packages/parsers  local document parsers, worker pool
-packages/ingest   ingestion pipeline, compiler, links, bulk import
-packages/hive     claims, promotion to the hive, curator queue, dream cycle
-packages/mcp      MCP server for the cloud agent: tools, resources, prompts
-packages/metrics  metrics store (1m/1h/1d rollups, queries for the panels), leader collector, host probe
-skills/           agent skills; .claude-plugin/ makes the repository an agent plugin
-packages/server   HTTP API (Fastify) and CLI
-packages/web      Svelte 5 web app, Playwright tests in e2e/
-bench/            corpus generator and spikes
-scripts/          development scripts (demo data, local CA)
-docker/           PostgreSQL image with pgBackRest
-docs/             plan, spike reports, guides (docs/guide), security review (docs/sicurezza), release checklist (docs/RILASCIO.md)
-```
 
 ## License and disclaimer
 

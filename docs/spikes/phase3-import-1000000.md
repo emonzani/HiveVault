@@ -1,21 +1,21 @@
-# Fase 3 — import massivo di 1.000.000 file
+# Phase 3 — Bulk import of 1,000,000 files
 
-Run `7wnbr2` · 2026-10-27T21:58:11.688Z · 2 processi worker × 8 task · file di testo da ~80 byte in cartelle da 1000
+Run `7wnbr2` · 2026-10-27T21:58:11.688Z · 2 worker processes × 8 tasks · ~80-byte text files in folders of 1,000
 
-| Misura | Valore |
+| Metric | Value |
 |---|---|
-| Generazione dei file (una volta) | 190 s |
-| Scansione | 47 s (1.000.000 file) |
-| Memorizzazione (lettura, cifratura, sorgente, task) | 125.2 file/s |
-| File salvati / duplicati / saltati / errori | 1000000 / 0 / 0 / 0 |
-| Sorgenti indicizzate (I1+) alla fine della misura | 1.000.000 |
-| Durata della misura | 134.8 min |
-| Spazio nel database (import_files, sources, tasks, eventi, chunk) | 4408 MB |
-| Coerenza dell'avanzamento | OK (salvati crescenti, somme corrette) |
+| File generation (one-time) | 190 s |
+| Scan | 47 s (1,000,000 files) |
+| Storage (read, encryption, source, task) | 125.2 files/s |
+| Files stored / duplicates / skipped / errors | 1000000 / 0 / 0 / 0 |
+| Indexed sources (I1+) at end of run | 1,000,000 |
+| Run duration | 134.8 min |
+| Database storage (`import_files`, `sources`, `tasks`, events, chunks) | 4408 MB |
+| Progress consistency | OK (stored count monotonically increasing, sums match) |
 
-## Avanzamento campionato
+## Sampled progress
 
-| t (s) | Stato | Salvati | In attesa | File/s | ETA (s) | Indicizzati |
+| t (s) | Status | Stored | Pending | Files/s | ETA (s) | Indexed |
 |---|---|---|---|---|---|---|
 | 60 | running | 7000 | 993000 | 593.8 | 1672 | 2788 |
 | 120 | running | 34500 | 965500 | 489.5 | 1972 | 14274 |

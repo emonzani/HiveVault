@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # HiveVault — installation and update of a server from this computer, over SSH.
-# See docs/guide/operatore.md §4. The code goes as an archive of a git commit (no git remote).
+# See docs/guides/operator.md §4. The code goes as an archive of a git commit (no git remote).
 #
 #   bash scripts/deploy.sh                          update the server to the current commit
 #   bash scripts/deploy.sh --install --host <name>  first installation (runs scripts/install.sh)

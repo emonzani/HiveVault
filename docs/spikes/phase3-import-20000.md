@@ -1,21 +1,21 @@
-# Fase 3 — import massivo di 20.000 file
+# Phase 3 — Bulk import of 20,000 files
 
-Run `jd7yy6` · 2026-10-27T19:38:19.209Z · 2 processi worker × 8 task · file di testo da ~80 byte in cartelle da 1000
+Run `jd7yy6` · 2026-10-27T19:38:19.209Z · 2 worker processes × 8 tasks · ~80-byte text files in folders of 1,000
 
-| Misura | Valore |
+| Metric | Value |
 |---|---|
-| Generazione dei file (una volta) | 0 s |
-| Scansione | 1 s (20.000 file) |
-| Memorizzazione (lettura, cifratura, sorgente, task) | 534.9 file/s |
-| File salvati / duplicati / saltati / errori | 20000 / 0 / 0 / 0 |
-| Sorgenti indicizzate (I1+) alla fine della misura | 20.000 |
-| Durata della misura | 1.2 min |
-| Spazio nel database (import_files, sources, tasks, eventi, chunk) | 355 MB |
-| Coerenza dell'avanzamento | OK (salvati crescenti, somme corrette) |
+| File generation (one-time) | 0 s |
+| Scan | 1 s (20,000 files) |
+| Storage (read, encryption, source, task) | 534.9 files/s |
+| Files stored / duplicates / skipped / errors | 20000 / 0 / 0 / 0 |
+| Indexed sources (I1+) at end of run | 20,000 |
+| Run duration | 1.2 min |
+| Database storage (`import_files`, `sources`, `tasks`, events, chunks) | 355 MB |
+| Progress consistency | OK (stored count monotonically increasing, sums match) |
 
-## Avanzamento campionato
+## Sampled progress
 
-| t (s) | Stato | Salvati | In attesa | File/s | ETA (s) | Indicizzati |
+| t (s) | Status | Stored | Pending | Files/s | ETA (s) | Indexed |
 |---|---|---|---|---|---|---|
 | 10 | running | 4500 | 15500 | 574.9 | 27 | 1890 |
 | 20 | running | 10000 | 10000 | 563.6 | 18 | 4118 |

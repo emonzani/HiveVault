@@ -39,4 +39,4 @@ hit@5 = the expected source document is among the first 5 documents (131 questio
 | relational (23) | 83% | 83% |
 | **total** | **65%** | **46%** |
 
-Note: "updated" questions expect the newest source; vector search alone cannot know which value is current — that is the job of the compiled page (stato attuale + timeline).
+Note: "updated" questions expect the newest source; vector search alone cannot know which value is current — that is the job of the compiled page (current state (`Stato attuale`) + timeline).

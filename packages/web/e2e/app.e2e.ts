@@ -239,19 +239,20 @@ test("schermate per la documentazione", async ({ page, theme }) => {
   await ready(page);
   await expect(page.getByRole("heading", { level: 1, name: T("Beta") })).toBeVisible();
   await page.waitForTimeout(1200);
-  await page.screenshot({ path: `${dir}/pagina-${theme}.png` });
+  const themeName = theme === "chiaro" ? "light" : theme === "scuro" ? "dark" : theme;
+  await page.screenshot({ path: `${dir}/page-${themeName}.png` });
   if (theme !== "chiaro") return;
   await page.locator(".md.body").getByRole("link", { name: T("Alfa") }).hover();
   await expect(page.getByRole("tooltip")).toBeVisible();
-  await page.screenshot({ path: `${dir}/anteprima-link.png` });
+  await page.screenshot({ path: `${dir}/link-preview.png` });
   await page.goto(`/#/cerca?q=${encodeURIComponent(`postazioni ${seed.run}`)}`);
   await expect(page.getByRole("list", { name: "Risultati" }).getByRole("button").first()).toBeVisible();
   await page.waitForTimeout(500);
-  await page.screenshot({ path: `${dir}/ricerca.png` });
+  await page.screenshot({ path: `${dir}/search.png` });
   await page.goto("/#/grafo");
   await expect(page.locator("canvas").first()).toBeVisible();
   await page.waitForTimeout(2500);
-  await page.screenshot({ path: `${dir}/grafo.png` });
+  await page.screenshot({ path: `${dir}/graph.png` });
   await page.goto(`/#/p/${seed.pages.alfa}`);
   await ready(page);
   await page.keyboard.press("Control+e");
@@ -262,16 +263,16 @@ test("schermate per la documentazione", async ({ page, theme }) => {
   await page.getByRole("button", { name: "Carica documenti" }).first().click();
   await page.getByRole("dialog", { name: "Carica nella memoria" }).locator('input[type="file"]').setInputFiles({ name: "offerta-2026.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n") });
   await page.waitForTimeout(300);
-  await page.screenshot({ path: `${dir}/caricamento.png` });
+  await page.screenshot({ path: `${dir}/upload.png` });
   await page.keyboard.press("Escape");
   await page.goto("/#/curatori");
   await expect(page.locator(".card").first()).toBeVisible();
   await page.waitForTimeout(400);
-  await page.screenshot({ path: `${dir}/curatori.png` });
+  await page.screenshot({ path: `${dir}/curators.png` });
   await page.locator(".card.conflict h2 a").first().click();
   await expect(page.locator(".callout-conflict")).toBeVisible();
   await page.waitForTimeout(800);
-  await page.screenshot({ path: `${dir}/alveare.png` });
+  await page.screenshot({ path: `${dir}/hive.png` });
 });
 
 test("coda dei curatori: conflitto tra celle deciso dall'interfaccia", async ({ page }) => {

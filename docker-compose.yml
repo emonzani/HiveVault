@@ -1,6 +1,6 @@
 # HiveVault — development services.
 # postgres: PostgreSQL 17 + pgvector. pgbouncer: transaction pooling for the app.
-# Tuning for the development server (64 GB RAM, Docker VM 32 GB): see docs/PIANO_DI_SVILUPPO.md §2.5.
+# Tuning for the development server (64 GB RAM, Docker VM 32 GB): see docs/DEVELOPMENT_PLAN.md §2.5.
 name: hivevault
 
 services:

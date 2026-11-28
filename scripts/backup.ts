@@ -2,7 +2,7 @@
  * Database backup with pgBackRest (phase 8), through the `postgres` service of docker compose.
  *
  *   npm run backup -- stanza    creates the stanza (once, on an existing data volume)
- *   npm run backup -- full      full backup          (weekly: see docs/guide/operatore.md)
+ *   npm run backup -- full      full backup          (weekly: see docs/guides/operator.md)
  *   npm run backup -- diff      differential backup  (daily)
  *   npm run backup -- info      backups and WAL in the repository
  *   npm run backup -- verify    restore test: point-in-time restore of the latest backup into a

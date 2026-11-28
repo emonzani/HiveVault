@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # HiveVault — installation on a Linux server (Debian 12 / Ubuntu 22.04 or newer).
-# See docs/guide/installazione.md. Run from the repository folder as the user that runs the
+# See docs/guides/installation.md. Run from the repository folder as the user that runs the
 # service (not root):
 #
 #   bash scripts/install.sh --host brain.azienda.local [--port 3700] [--tls-cert f --tls-key f]
@@ -193,7 +193,7 @@ fi
 say "Fatto"
 SC="sudo systemctl"; [ "$SYSTEMD" = user ] && SC="systemctl --user"
 cat <<EOF
-Prossimi passi (docs/guide/installazione.md):
+Prossimi passi (docs/guides/installation.md):
   1. Primo amministratore:   npm run cb -- admin create <nome> --name "Nome Cognome"
                              npm run cb -- enroll <codice di attivazione>
   2. Copia FUORI dal server, in un posto sicuro:

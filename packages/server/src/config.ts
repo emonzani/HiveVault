@@ -41,7 +41,7 @@ export interface ServerConfig {
   /** Sources never asked to compile (imports) compiled while the chat model is free (M3). */
   idleCompile: boolean;
   /**
-   * Privacy (docs/sicurezza/privacy.md): days read events (page.read, search, ...) stay in the audit log,
+   * Privacy (docs/security/privacy.md): days read events (page.read, search, ...) stay in the audit log,
    * and whether email files (EML, MSG, MBOX) are ingested. The console can change both.
    */
   privacy: { readRetentionDays: number; emailIngest: boolean };

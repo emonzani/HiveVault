@@ -1,4 +1,4 @@
-// Privacy over HTTP (docs/sicurezza/privacy.md): "personale" content is read only by the owner of the
+// Privacy over HTTP (docs/security/privacy.md): "personale" content is read only by the owner of the
 // personal vault, never by administrators; teams; account deletion with transfer to a team;
 // rectification is in hive.e2e; audit log append-only with a hash chain; nightly upkeep.
 import { randomBytes } from "node:crypto";

@@ -1,20 +1,20 @@
-# Benchmark della compilazione (M13)
+# Compilation benchmark (M13)
 
-2026-11-11T13:28:39.795Z · modello `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` · 20 documenti del corpus `data/corpus/dev` · compilazione una sorgente alla volta
+2026-11-11T13:28:39.795Z · model `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` · 20 documents from corpus `data/corpus/dev` · compiled one source at a time
 
-| Misura | Valore |
+| Metric | Value |
 |---|---|
-| Sorgenti compilate / fallite | 20 / 0 |
-| Secondi per sorgente (media, p50, p90) | 174 · 161 · 279 |
-| Turni dell'agente per sorgente | 4,7 |
-| Token per sorgente (prompt, risposta) | 31.306 · 8032 |
-| Token di testo della sorgente (media) | 166 |
-| Token di risposta al secondo | 46,1 |
-| Pagine scritte per sorgente · scritture rifiutate | 5,9 · 0,0 |
-| Sorgenti all'ora | 20,7 |
-| Ore per 1.000 sorgenti | 48,4 |
-| Risposte attese nelle pagine del modello (top 5) | 25/26 |
-| … domande «lookup» | 18/19 |
-| … domande «updated» | 7/7 |
+| Sources compiled / failed | 20 / 0 |
+| Seconds per source (mean, p50, p90) | 174 · 161 · 279 |
+| Agent turns per source | 4.7 |
+| Tokens per source (prompt, completion) | 31,306 · 8,032 |
+| Source text tokens (mean) | 166 |
+| Completion tokens per second | 46.1 |
+| Pages written per source · rejected writes | 5.9 · 0.0 |
+| Sources per hour | 20.7 |
+| Hours per 1,000 sources | 48.4 |
+| Expected answers in model-written pages (top 5) | 25/26 |
+| … "lookup" questions | 18/19 |
+| … "updated" questions | 7/7 |
 
-Dati per sorgente: `bench/out/compile-mwc3kbiv.json`.
+Per-source data: `bench/out/compile-mwc3kbiv.json`.

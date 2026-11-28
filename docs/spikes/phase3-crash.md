@@ -1,18 +1,18 @@
-# Fase 3 — compilazione con crash dei worker
+# Phase 3 — Compilation under worker crashes
 
-Run `14zqzk` · 2026-10-27T19:16:46.534Z · 60 sorgenti caricate (12 figli da ZIP) · 2 processi worker · SIGKILL ogni 1500 ms · modello a copione lento (150 ms per turno, 4 turni per sorgente)
+Run `14zqzk` · 2026-10-27T19:16:46.534Z · 60 uploaded sources (12 children from ZIP) · 2 worker processes · SIGKILL every 1500 ms · slow scripted model (150 ms per turn, 4 turns per source)
 
-| Controllo | Risultato |
+| Check | Result |
 |---|---|
-| Sorgenti (con i figli) | 72 |
-| Processi worker uccisi | 7 |
-| Task ripresi dopo la scadenza del lease | 33 |
-| Sorgenti non compilate | nessuna |
-| Pagine sorgente: mancanti / duplicate | 0 / 0 |
-| Pagine di entità per sorgente (attese 72) | 72 |
-| Pagine con titolo duplicato | nessuna |
-| Pagina condivisa "Cliente comune": copie / versioni | 1 / 85 |
-| Task non conclusi | 0 |
-| Tempo totale | 11.8 s |
+| Sources (including children) | 72 |
+| Worker processes killed | 7 |
+| Tasks recovered after lease expiry | 33 |
+| Uncompiled sources | none |
+| Source pages: missing / duplicate | 0 / 0 |
+| Entity pages per source (expected 72) | 72 |
+| Pages with duplicate title | none |
+| Shared page "Cliente comune": copies / versions | 1 / 85 |
+| Unfinished tasks | 0 |
+| Total time | 11.8 s |
 
-**Esito: SUPERATO** — nessuna sorgente persa, nessuna pagina duplicata.
+**Result: PASS** — no source lost, no duplicate pages.

@@ -1,7 +1,7 @@
 # AGENTS.md — HiveVault
 
 Rules for AI coding agents that develop this repository.
-The full plan is in [docs/PIANO_DI_SVILUPPO.md](docs/PIANO_DI_SVILUPPO.md). Read it before a large change.
+The full plan is in [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md). Read it before a large change.
 
 ## 1. Identity
 
@@ -31,7 +31,7 @@ Durable tasks, workflows and the wiki are our own implementation. Do not add ext
 16. **MCP never returns more than "interno".** `readerOf` caps the clearance at `MCP_MAX_CLASSIFICATION` whatever the account has; generated indexes are rendered under the reader's clearance (`renderIndexes` inside `withReader`), never served from the stored copy. The cloud agent never writes directly: `brain_capture` and `brain_journal` write only to an inbox, `brain_propose_edit` waits for a person. The one direct channel is the project documentation of coding agents (`routes/projects.ts`): an API account with the scope `projects`, only the six pages under `progetto/` of vaults owned by `project:<slug>`, with a version check and an audit row per write. With `read` too, the same key uses MCP and `brain_capture` writes into the inbox of project vaults (as a source for ingestion by default); `requireAction` refuses every other write of a key without `write` or `ingest`. A key bound to a user (`principals.user_id`) never reaches more than that user, and not the user's personal vaults (`Access.apiContext`).
 17. **Large automatic changes ask first.** A change that removes or rewrites more than a fifth of a vault (`isMassChange`) does not run by itself: the dream cycle opens a curator item `mass_change`, an import needs a second confirmation and saves a checkpoint first.
 18. **Metric labels are bounded.** Use route templates, statuses, task names, endpoint ids, vault ids of hive spaces, the top partitions: never page ids, user ids, queries or free text. The registry stops at 5000 series. Panels read metrics through `MetricsStore.query`; ad-hoc SQL on `metrics_*` is for the benchmark only.
-19. **"personale" (classification 4) belongs to its owner.** It exists only in personal vaults (owner `user:<id>`) and only the owner reads or sets it: RLS lets it through only for `cb.personal` (`Principal.personal`, filled by `Access.toReader`). Administrators never see it: every route or job that reads content as the owner role (console lists, exports, imports, checkpoints, merges, stats, stored indexes, claims, crosslinks) excludes `classification = 4`. A deleted user's personal content is deleted (`IngestService.purgePersonal`); the rest goes to a team. See `docs/sicurezza/privacy.md`.
+19. **"personale" (classification 4) belongs to its owner.** It exists only in personal vaults (owner `user:<id>`) and only the owner reads or sets it: RLS lets it through only for `cb.personal` (`Principal.personal`, filled by `Access.toReader`). Administrators never see it: every route or job that reads content as the owner role (console lists, exports, imports, checkpoints, merges, stats, stored indexes, claims, crosslinks) excludes `classification = 4`. A deleted user's personal content is deleted (`IngestService.purgePersonal`); the rest goes to a team. See `docs/security/privacy.md`.
 20. **The audit log is append-only.** No UPDATE, no TRUNCATE, security events kept at least 183 days, hash chain over them (migration `014_privacy.sql`, `verifyAuditChain`). Read events (`cb_audit_is_read`) stay outside the chain with their own retention.
 
 ## 3. Code map
@@ -53,7 +53,7 @@ Durable tasks, workflows and the wiki are our own implementation. Do not add ext
 | `packages/mcp` | MCP server (`server.ts`: tools, resources, prompts) and the 11 tools as plain functions (`tools.ts`, reused by the eval); mounted at `POST /mcp` by `packages/server/src/routes/mcp.ts` |
 | `packages/web` | Svelte 5 SPA: `src/app` (shell, views), `src/lib` (API client, workspace with tabs and panes, safe Markdown renderer, caches, translations `i18n.ts` + `i18n/*.json`), `src/styles/tokens.css` (themes "chiaro" and "scuro" of the Editorial Knowledge design system; values checked at 4.5:1), `src/app/SourceInspector.svelte` (right panel of the inbox); Playwright tests in `e2e/` |
 | `docker/postgres` | PostgreSQL 17 + pgvector + pgBackRest image; WAL archiving to an encrypted repository (`scripts/backup.ts`) |
-| `docs/guide`, `docs/sicurezza`, `docs/RILASCIO.md` | installation, operator, admin and user guides (ASD-STE 100); OWASP ASVS L2 review; GDPR and Italian law compliance with checklists (`privacy.md`); release checklist |
+| `docs/guides`, `docs/security`, `docs/RELEASE.md` | installation, operator, admin and user guides (ASD-STE 100); OWASP ASVS L2 review; GDPR and Italian law compliance with checklists (`privacy.md`); release checklist |
 | `bench/corpus` | deterministic synthetic corpus generator with ground truth |
 | `bench/spike-*`, `bench/phase*` | spikes and benchmarks; reports in `docs/spikes/` |
 | `skills/`, `.claude-plugin/` | agent skills and the agent plugin (MCP server + skills) |

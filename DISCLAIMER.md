@@ -13,7 +13,7 @@ I termini vincolanti sono nel file [LICENSE](LICENSE) (MIT). Questo file li spie
    - compliance with the GDPR, national law (in Italy: Legislative Decree 196/2003, Law 300/1970 art. 4, Legislative Decree 152/1997 art. 1-bis, Law 132/2025) and the AI Act (Regulation (EU) 2024/1689);
    - security, backups, keys, updates and access control of their installation;
    - the content they load and the models and external services they connect, including the cloud agent.
-5. **Not legal advice.** The documents in `docs/` (also `docs/sicurezza/privacy.md`) describe the software and give checklists. They are not legal advice. Have them checked by your data protection officer or a lawyer.
+5. **Not legal advice.** The documents in `docs/` (also `docs/security/privacy.md`) describe the software and give checklists. They are not legal advice. Have them checked by your data protection officer or a lawyer.
 6. **Models and third-party components.** Language models, the cloud agent and the dependencies of the software have their own licenses and terms. The authors give no warranty on their output, availability or compliance. Text written by a model can be wrong: check it before you rely on it.
 7. **Non-commercial open source.** The software is free and open source and is distributed outside any commercial activity of the authors.
 8. **Limits of this exclusion.** Some laws do not allow some exclusions of liability (for example, liability for wilful misconduct or gross negligence). In that case the exclusion applies to the maximum extent the law permits, and the rest of this notice stays valid.
@@ -27,7 +27,7 @@ I termini vincolanti sono nel file [LICENSE](LICENSE) (MIT). Questo file li spie
    - conformità al GDPR, alla normativa nazionale (in Italia: D.Lgs. 196/2003, art. 4 L. 300/1970, art. 1-bis D.Lgs. 152/1997, L. 132/2025) e all'AI Act (Regolamento (UE) 2024/1689);
    - sicurezza, backup, chiavi, aggiornamenti e controllo degli accessi della loro installazione;
    - contenuti caricati e modelli e servizi esterni collegati, compreso l'agente cloud.
-5. **Non è un parere legale.** I documenti in `docs/` (anche `docs/sicurezza/privacy.md`) descrivono il software e danno liste di controllo. Non sono un parere legale. Fateli verificare dal vostro responsabile della protezione dei dati o da un legale.
+5. **Non è un parere legale.** I documenti in `docs/` (anche `docs/security/privacy.md`) descrivono il software e danno liste di controllo. Non sono un parere legale. Fateli verificare dal vostro responsabile della protezione dei dati o da un legale.
 6. **Modelli e componenti di terzi.** I modelli linguistici, l'agente cloud e le dipendenze del software hanno licenze e condizioni proprie. Gli autori non danno garanzie sui loro risultati, sulla loro disponibilità o sulla loro conformità. Il testo scritto da un modello può essere sbagliato: controllatelo prima di farci affidamento.
 7. **Open source non commerciale.** Il software è libero e open source ed è distribuito fuori da ogni attività commerciale degli autori.
 8. **Limiti di questa esclusione.** Alcune leggi non permettono alcune esclusioni di responsabilità (per esempio, in Italia, l'art. 1229 del Codice civile per il dolo e la colpa grave). In quel caso l'esclusione vale nella misura massima consentita dalla legge, e il resto di questo avviso resta valido.

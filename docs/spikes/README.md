@@ -1,496 +1,496 @@
-# Fase 0 — esiti degli spike
+# Phase 0 — Spike results
 
-Data: 2026-10-27 · Macchina: AMD Ryzen 9 9900X (24 thread), 62 GB RAM, Windows 11, Docker Desktop (VM 32 GB) · PostgreSQL 17.11 + pgvector 0.8.7
+Date: 2026-10-27 · Machine: AMD Ryzen 9 9900X (24 threads), 62 GB RAM, Windows 11, Docker Desktop (32 GB VM) · PostgreSQL 17.11 + pgvector 0.8.7
 
-Rapporti completi: [spike-a.md](spike-a.md) · [spike-c.md](spike-c.md) · [spike-d.md](spike-d.md)
+Full reports: [spike-a.md](spike-a.md) · [spike-c.md](spike-c.md) · [spike-d.md](spike-d.md)
 
-## Spike A — task engine durevole
+## Spike A — Durable task engine
 
-**Esito: confermato.** 300 task da 4 fasi, 3 processi worker, 19 processi uccisi con SIGKILL durante l'esecuzione:
-tutti i task completati, ogni effetto sul database eseguito **esattamente una volta**, nessun effetto perso.
-Una fase interrotta riparte dall'ultimo checkpoint; il recupero dopo un crash richiede al massimo la durata del lease (1,5 s nel test) più il ciclo del reaper.
+**Result: confirmed.** 300 4-phase tasks, 3 worker processes, 19 processes killed with SIGKILL during execution:
+all tasks completed, every database effect ran **exactly once**, no effects lost.
+An interrupted phase resumes from the last checkpoint; recovery after a crash takes at most the lease duration (1.5 s in the test) plus the reaper cycle.
 
-Decisione: il task engine su Postgres (`FOR UPDATE SKIP LOCKED`, lease con fencing, effetti nel journal) è la base di ingestion e dream cycle. Nessuna coda esterna.
+Decision: the Postgres-backed task engine (`FOR UPDATE SKIP LOCKED`, fenced leases, journaled effects) is the foundation for ingestion and the dream cycle. No external queue.
 
-## Spike C — PostgreSQL + pgvector in scala
+## Spike C — PostgreSQL + pgvector at scale
 
-Chunk sintetici di ~700 caratteri, `halfvec(1024)`, 20 partizioni per vault. Latenze p95 dal client Node.
+Synthetic chunks of ~700 characters, `halfvec(1024)`, 20 partitions by vault. p95 latencies from the Node client.
 
-| Chunk | Spazio totale | Ibrida, 3 vault | Ibrida, tutti | Vettori, tutti (ef 40) | Recall@10 (ef 40 / 100) |
+| Chunks | Total size | Hybrid, 3 vaults | Hybrid, all | Vectors, all (ef 40) | Recall@10 (ef 40 / 100) |
 |---|---|---|---|---|---|
-| 1M | 6,8 GB | 10,7 ms | 69 ms | 35 ms | 99,3% / 100% |
-| 2M | 14,7 GB | 24,2 ms | 94 ms | 38 ms | 99,3% / 99,7% |
-| 5M | 34,7 GB | 145 ms | 1.560 ms | 886 ms | 93,3% / 97,7% |
+| 1M | 6.8 GB | 10.7 ms | 69 ms | 35 ms | 99.3% / 100% |
+| 2M | 14.7 GB | 24.2 ms | 94 ms | 38 ms | 99.3% / 99.7% |
+| 5M | 34.7 GB | 145 ms | 1,560 ms | 886 ms | 93.3% / 97.7% |
 
-Cosa abbiamo imparato:
+What we learned:
 
-1. **Il fattore decisivo è la RAM, non il numero di righe.** Fino a 2M chunk dati e indici stanno nella cache (VM da 32 GB) e tutte le query restano sotto i 100 ms. A 5M (34,7 GB) non ci stanno più e le latenze crescono di 10–20 volte. Regola di dimensionamento: **indice HNSW + parte calda della tabella devono stare in RAM**.
-2. **Il partizionamento per vault funziona come previsto.** Con 3 vault consentiti la query tocca solo le loro partizioni (Merge Append di tre scansioni HNSW): è 4–10 volte più veloce della ricerca su tutti i vault ed è anche il meccanismo dell'ACL.
-3. **La quantizzazione binaria è la strada per la scala TB.** A 1M chunk: indice di 0,40 GB invece di 2,54 GB (6 volte più piccolo), recall@10 96,7% con rescoring sui primi 200 candidati, latenza simile con 3 vault. Per 50M chunk: ~20 GB di indice invece di ~127 GB.
-4. **Gli inserimenti incrementali degradano un po' l'HNSW** (recall al 93% a 5M con ef 40). Rimedi: `ef_search` 100 sulle partizioni grandi e `REINDEX CONCURRENTLY` delle partizioni nel dream cycle.
-5. **Il full-text con `ts_rank_cd` è il punto debole** quando i dati non sono in cache (p95 1 s su tutti i vault a 5M): il ranking legge il `tsvector` di ogni riga che corrisponde. Va confrontato con ParadeDB `pg_search` (BM25 su indice) prima della fine della fase 1.
-6. **Il caricamento non è un collo di bottiglia.** COPY binario: 23k righe/s senza indici, 900–2.100 righe/s con HNSW aggiornato. Gli embedding in CPU producono ~30 chunk/s, quindi il database non rallenta l'ingestion. Per l'import massivo conviene caricare prima e costruire l'indice dopo, per partizione.
-7. Il confronto `halfvec(512)` (recall 38,7%) **non è valido**: i vettori sintetici non sono Matryoshka. Va ripetuto con il modello reale.
-8. Docker: `shm_size` deve superare `maintenance_work_mem`, altrimenti la build parallela dell'HNSW fallisce (corretto in `docker-compose.yml`).
+1. **The decisive factor is RAM, not row count.** Up to 2M chunks, data and indexes fit in cache (32 GB VM) and all queries stay below 100 ms. At 5M (34.7 GB), they no longer fit and latencies increase 10–20×. Sizing rule: **the HNSW index + hot portion of the table must fit in RAM**.
+2. **Partitioning by vault works as expected.** With 3 allowed vaults, the query touches only their partitions (Merge Append of three HNSW scans): it is 4–10× faster than searching all vaults and also serves as the ACL mechanism.
+3. **Binary quantization is the path to TB scale.** At 1M chunks: 0.40 GB index instead of 2.54 GB (6× smaller), recall@10 96.7% with rescoring on the top 200 candidates, similar latency with 3 vaults. For 50M chunks: ~20 GB index instead of ~127 GB.
+4. **Incremental inserts degrade HNSW slightly** (recall down to 93% at 5M with ef 40). Mitigations: `ef_search` 100 on large partitions and `REINDEX CONCURRENTLY` on partitions during the dream cycle.
+5. **Full-text with `ts_rank_cd` is the weak spot** when data is not in cache (p95 1 s across all vaults at 5M): ranking reads the `tsvector` of every matching row. Must be benchmarked against ParadeDB `pg_search` (indexed BM25) before the end of Phase 1.
+6. **Loading is not a bottleneck.** Binary COPY: 23k rows/s without indexes, 900–2,100 rows/s with live HNSW updates. CPU embeddings produce ~30 chunks/s, so the database does not slow down ingestion. For bulk import, it is best to load first and build the index afterward, per partition.
+7. The `halfvec(512)` comparison (recall 38.7%) **is invalid**: synthetic vectors are not Matryoshka. Must be repeated with the real model.
+8. Docker: `shm_size` must exceed `maintenance_work_mem`, otherwise parallel HNSW builds fail (fixed in `docker-compose.yml`).
 
-## Spike D — embedding in CPU, locale e remoto
+## Spike D — Embeddings on CPU, local and remote
 
-Modello sostitutivo: `nomic-embed-text-v1.5` Q4 (137M parametri, già presente sulla macchina). Quello previsto, Qwen3-Embedding-0.6B, è circa 4 volte più grande: ci aspettiamo 1–1,5k token/s con 12 thread, da misurare dopo il download.
+Stand-in model: `nomic-embed-text-v1.5` Q4 (137M parameters, already present on the machine). The planned model, Qwen3-Embedding-0.6B, is roughly 4× larger: we expect 1–1.5k tokens/s with 12 threads, to be measured after download.
 
-| Thread | Token/s | Chunk/s | Memoria del processo |
+| Threads | Tokens/s | Chunks/s | Process memory |
 |---|---|---|---|
-| 4 | 2.451 | 16,8 | 577 MB |
-| 8 | 3.801 | 26,1 | 579 MB |
-| 12 | 4.661 | 32,0 | 581 MB |
+| 4 | 2,451 | 16.8 | 577 MB |
+| 8 | 3,801 | 26.1 | 579 MB |
+| 12 | 4,661 | 32.0 | 581 MB |
 
-1. **Supervisore e dispatcher funzionano con un llama-server reale**: avvio, health check, due endpoint insieme con lavoro distribuito per velocità (204 / 206), endpoint con modello diverso rifiutato (`mismatch`).
-2. **Problema trovato e corretto: latenza delle query durante il backfill.** llama-server mette i testi di una richiesta in una coda FIFO interna: con lotti da 16 testi, una query interattiva aspettava fino a 6,2 s. Correzioni nel dispatcher:
-   - 1 slot per endpoint riservato alle query interattive;
-   - lotti in background divisi in richieste da 2 testi (stesso throughput, perché llama-server accorpa comunque gli slot).
+1. **Supervisor and dispatcher work with a real llama-server**: startup, health check, two endpoints running together with work distributed by speed (204 / 206), endpoint with a different model rejected (`mismatch`).
+2. **Issue found and fixed: query latency during backfill.** llama-server puts the texts of a request into an internal FIFO queue: with batches of 16 texts, an interactive query waited up to 6.2 s. Fixes in the dispatcher:
+   - 1 slot per endpoint reserved for interactive queries;
+   - background batches split into requests of 2 texts (same throughput, because llama-server merges slots anyway).
 
-   Risultato: query durante il backfill con p95 **646 ms** (prima 6.154 ms), throughput invariato (~5.000 token/s).
-3. **Qualità (indicativa):** hit@5 65% con nomic contro 46% del mock lessicale. Sulle domande con un valore aggiornato nel tempo solo 30%: la ricerca vettoriale da sola non sa quale valore è quello attuale. Conferma la scelta delle pagine compilate (stato attuale + timeline).
+   Result: query p95 during backfill **646 ms** (previously 6,154 ms), throughput unchanged (~5,000 tokens/s).
+3. **Quality (indicative):** hit@5 65% with nomic vs. 46% for the lexical mock. On questions whose value updated over time, only 30%: vector search alone cannot tell which value is current. Confirms the choice of compiled pages (current state + timeline).
 
-## Decisioni e azioni per la fase 1
+## Decisions and actions for Phase 1
 
-| # | Decisione / azione |
+| # | Decision / action |
 |---|---|
-| 1 | Indice vettoriale di default sugli spazi grandi: **HNSW su `binary_quantize` + rescoring in `halfvec`**; HNSW `halfvec` completo solo sugli spazi piccoli e molto consultati. |
-| 2 | Dimensionamento RAM della produzione: indice HNSW + parte calda della tabella × 1,2. |
-| 3 | Spike C2 (prima della fine della fase 1): ParadeDB `pg_search` contro `tsvector`, e `pgvectorscale` (StreamingDiskANN). Servono immagini Docker diverse. |
-| 4 | Scaricare Qwen3-Embedding-0.6B e Qwen3-Reranker-0.6B (GGUF Q8_0, ~0,65 GB ciascuno) e ripetere lo spike D: throughput reale, qualità in italiano, troncamento a 512. **Serve la tua autorizzazione al download.** |
-| 5 | Dream cycle: `REINDEX CONCURRENTLY` delle partizioni con HNSW degradato; `ef_search` per partizione in base alla dimensione. |
-| 6 | Chunk reali più lunghi (300–800 token, ~2.000 caratteri): rifare le stime di spazio con il corpus reale della fase 3. |
+| 1 | Default vector index on large spaces: **HNSW on `binary_quantize` + rescoring in `halfvec`**; full `halfvec` HNSW only on small, heavily queried spaces. |
+| 2 | Production RAM sizing: (HNSW index + hot portion of the table) × 1.2. |
+| 3 | Spike C2 (before the end of Phase 1): ParadeDB `pg_search` vs. `tsvector`, and `pgvectorscale` (StreamingDiskANN). Requires different Docker images. |
+| 4 | Download Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B (GGUF Q8_0, ~0.65 GB each) and repeat Spike D: real throughput, Italian quality, truncation at 512. **Requires your authorization to download.** |
+| 5 | Dream cycle: `REINDEX CONCURRENTLY` on partitions with degraded HNSW; per-partition `ef_search` based on size. |
+| 6 | Longer real chunks (300–800 tokens, ~2,000 characters): redo storage estimates with the real Phase 3 corpus. |
 
 ---
 
-# Fase 1 — motore della memoria
+# Phase 1 — Memory engine
 
-Data: 2026-10-27 · stessa macchina della fase 0
+Date: 2026-10-27 · same machine as Phase 0
 
-Rapporti: [phase1-bench-long.md](phase1-bench-long.md) · [phase1-bench-tiny.md](phase1-bench-tiny.md) · [spike-c2-paradedb.md](spike-c2-paradedb.md) · [spike-c2-timescale.md](spike-c2-timescale.md)
+Reports: [phase1-bench-long.md](phase1-bench-long.md) · [phase1-bench-tiny.md](phase1-bench-tiny.md) · [spike-c2-paradedb.md](spike-c2-paradedb.md) · [spike-c2-timescale.md](spike-c2-timescale.md)
 
-## Benchmark di accettazione (motore completo, 1M chunk, 20 vault)
+## Acceptance benchmark (full engine, 1M chunks, 20 vaults)
 
-Misure end-to-end del `SearchEngine` vero: embedding della query, transazione con ruolo `cb_reader` e RLS, SQL, raggruppamento, snippet, budget. Cache disattivata.
+End-to-end measurements of the real `SearchEngine`: query embedding, transaction under role `cb_reader` with RLS, SQL, grouping, snippets, budgeting. Cache disabled.
 
-| Operazione | p95, vocabolario realistico | p95, vocabolario minimo (caso peggiore) | Obiettivo (§0.2) |
+| Operation | p95, realistic vocabulary | p95, minimal vocabulary (worst case) | Target (§0.2) |
 |---|---|---|---|
-| Ricerca ibrida, 3 vault | **30,5 ms** | 31,8 ms | < 200 ms ✅ |
-| Ricerca ibrida, 20 vault (tutto l'alveare) | **86,5 ms** | 85,4 ms | < 600 ms ✅ |
-| Ricerca per titolo, solo pagine | 49,4 ms | 48,7 ms | — |
-| Lettura pagina con budget (800 token) | 4,5 ms | 4,3 ms | < 20 ms ✅ |
-| Ricerca ripetuta (cache) | 1,3 ms | 0,9 ms | — |
+| Hybrid search, 3 vaults | **30.5 ms** | 31.8 ms | < 200 ms ✅ |
+| Hybrid search, 20 vaults (entire hive) | **86.5 ms** | 85.4 ms | < 600 ms ✅ |
+| Title search, pages only | 49.4 ms | 48.7 ms | — |
+| Budgeted page read (800 tokens) | 4.5 ms | 4.3 ms | < 20 ms ✅ |
+| Repeated search (cache) | 1.3 ms | 0.9 ms | — |
 
-Caricamento in blocco: ~19.500 chunk/s, poi indice binario sulle 20 partizioni in ~75 s. Spazio: 5,2 GB per 1M chunk (tabelle + indici).
+Bulk load: ~19,500 chunks/s, then binary index across all 20 partitions in ~75 s. Storage: 5.2 GB for 1M chunks (tables + indexes).
 
-## Tre problemi trovati dal benchmark e corretti
+## Three issues found by the benchmark and fixed
 
-| # | Sintomo (20 vault) | Causa | Correzione |
+| # | Symptom (20 vaults) | Cause | Fix |
 |---|---|---|---|
-| 1 | 2,7 s | Le policy RLS chiamavano `cb_vaults()` per ogni riga candidata | Migrazione 003: `(select cb_vaults())`, calcolato una volta (InitPlan) |
-| 2 | 0,9 s | Con la RLS, l'operatore full-text `@@` non è LEAKPROOF: Postgres non usava l'indice GIN e leggeva tutte le partizioni | Migrazione 004: `ts_match_vq` e `similarity_op` marcati LEAKPROOF (motivazione nel file). Serve un superuser |
-| 3 | — | La `tsquery` presa da una sottoquery in join non è una condizione d'indice | `tsquery` scritta direttamente nel `WHERE` |
+| 1 | 2.7 s | RLS policies called `cb_vaults()` for every candidate row | Migration 003: `(select cb_vaults())`, evaluated once (InitPlan) |
+| 2 | 0.9 s | Under RLS, the full-text operator `@@` is not LEAKPROOF: Postgres skipped the GIN index and scanned all partitions | Migration 004: `ts_match_vq` and `similarity_op` marked LEAKPROOF (rationale in file). Requires superuser |
+| 3 | — | A `tsquery` coming from a joined subquery is not an index condition | `tsquery` written directly in the `WHERE` clause |
 
-Tentativo scartato: statement preparati. Il piano generico di Postgres per questa query partizionata era 2–3 volte più lento.
+Discarded attempt: prepared statements. Postgres's generic plan for this partitioned query was 2–3× slower.
 
-## Spike C2 — alternative per full-text e vettori
+## Spike C2 — Alternatives for full-text and vectors
 
-**Full-text, 1M chunk, una tabella** (p95 ms, 20 vault):
+**Full-text, 1M chunks, single table** (p95 ms, 20 vaults):
 
-| Metodo | Query con termine raro | Query con parole comuni |
+| Method | Rare-term query | Common-word query |
 |---|---|---|
-| tsvector, AND (`websearch_to_tsquery`, usato dal motore) | 5,5 | 18,0 |
-| tsvector, OR | 657 | 990 |
-| ParadeDB `pg_search` 0.26 (BM25, OR) | 22,5 | 22,8 |
+| `tsvector`, AND (`websearch_to_tsquery`, used by the engine) | 5.5 | 18.0 |
+| `tsvector`, OR | 657 | 990 |
+| ParadeDB `pg_search` 0.26 (BM25, OR) | 22.5 | 22.8 |
 
-- La semantica AND di Postgres è veloce con un vocabolario reale, ma esige tutte le parole: su domande in linguaggio naturale perde risultati, che oggi recupera il ramo vettoriale.
-- ParadeDB dà BM25 vero con semantica OR a latenza costante, ma: **licenza AGPL-3.0**, immagine su **PostgreSQL 18**, indice 2,3× più grande del GIN.
+- Postgres AND semantics are fast with a realistic vocabulary, but require all words: on natural-language questions it misses results that the vector branch currently recovers.
+- ParadeDB provides true BM25 with OR semantics at constant latency, but: **AGPL-3.0 license**, image on **PostgreSQL 18**, index 2.3× larger than GIN.
 
-**Vettori, 1M × 1024, una tabella** (p95 ms / recall@10, 20 vault):
+**Vectors, 1M × 1024, single table** (p95 ms / recall@10, 20 vaults):
 
-| Indice | Build | Dimensione | Latenza | Recall@10 |
+| Index | Build | Size | Latency | Recall@10 |
 |---|---|---|---|---|
-| pgvector HNSW binario + rescoring | 35 s | 0,40 GB | 7,6 ms | 76,3% |
-| pgvectorscale DiskANN (SBQ) | **1.401 s** | 0,54 GB | 10,3 ms | 89,8% |
-| DiskANN con etichette per vault | build interrotta (~1 h 45 min stimata) | — | — | — |
+| pgvector binary HNSW + rescoring | 35 s | 0.40 GB | 7.6 ms | 76.3% |
+| pgvectorscale DiskANN (SBQ) | **1,401 s** | 0.54 GB | 10.3 ms | 89.8% |
+| DiskANN with vault labels | build aborted (~1 h 45 min estimated) | — | — | — |
 
-- DiskANN si costruisce 40 volte più lentamente. Su una sola tabella ha recall migliore, ma il nostro schema partizionato per vault dà già **96,7%** con l'HNSW binario (spike C, partizioni da 50k).
-- L'immagine TimescaleDB ha la telemetria attiva per default.
+- DiskANN builds 40× slower. On a single table it has better recall, but our vault-partitioned schema already achieves **96.7%** with binary HNSW (Spike C, 50k-row partitions).
+- The TimescaleDB image has telemetry enabled by default.
 
-## Decisioni
+## Decisions
 
-| # | Decisione |
+| # | Decision |
 |---|---|
-| 1 | **Restiamo su pgvector** (HNSW binario per partizione). DiskANN scartato: costo di build incompatibile con import massivo e REINDEX notturno, nessun vantaggio di recall con le partizioni. |
-| 2 | **Full-text: tsvector in AND** per ora (obiettivi raggiunti). ParadeDB resta un'opzione per la qualità del ranking: decisione D11, da valutare con l'eval reale della fase 6. |
-| 3 | La soglia di similarità vettoriale (`minVectorSimilarity`) va calibrata col modello reale: oggi è 0 (disattivata). |
-| 4 | Le migrazioni che toccano funzioni di sistema (004) vanno eseguite da un superuser: da scrivere nella guida di installazione. |
+| 1 | **Stay on pgvector** (per-partition binary HNSW). DiskANN discarded: build cost is incompatible with bulk import and nightly REINDEX, with no recall advantage once partitioned. |
+| 2 | **Full-text: `tsvector` with AND** for now (targets met). ParadeDB remains an option for ranking quality: decision D11, to be evaluated with the real Phase 6 eval. |
+| 3 | The vector similarity threshold (`minVectorSimilarity`) must be calibrated with the real model: currently 0 (disabled). |
+| 4 | Migrations that touch system functions (004) must be run by a superuser: document in the installation guide. |
 
 ---
 
-# Fase 2 — autenticazione, autorizzazione, API di amministrazione
+# Phase 2 — Authentication, authorization, admin API
 
-Data: 2026-10-27
+Date: 2026-10-27
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Account | Una tabella `principals` per persone e account API; ruoli `admin`, `curator`, `member`; ambiti API `read`, `write`, `ingest`, `admin`; clearance 0–3 |
-| TOTP | RFC 6238 implementata nel progetto (verificata con i vettori ufficiali RFC 6238 e RFC 4226). Segreto cifrato con la chiave master (AES-256-GCM, legato all'account). Un codice vale una volta. 10 codici di recupero |
-| Attivazione | L'admin crea l'utente e riceve un codice monouso (24 h). L'utente lo usa nella pagina di attivazione o con `npm run cb -- enroll <codice>` (QR nel terminale) |
-| Passkey | WebAuthn (SimpleWebAuthn 13), attestazione "none", login anche senza nome utente. Rifiuta origini diverse e risposte ripetute |
-| Firma | `cb-auth-v1\|utente\|nonce\|ts` firmato con Ed25519, ECDSA P-256 o certificato X.509 della CA aziendale. Nonce monouso (60 s), ts ±60 s. CLI `npm run cb -- login --key` |
-| Chiavi API | `cb_<id>_<segreto>`, solo l'hash nel database; scadenza, revoca, IP consentiti (CIDR v4/v6), limite di richieste per account |
-| Sessioni | Token casuale nel cookie `HttpOnly; SameSite=Strict` (e `Secure` in HTTPS), hash nel database; scadenza per inattività (12 h) e assoluta (7 giorni); token CSRF per sessione (double submit) |
-| Protezioni | Blocco progressivo per nome utente (5 errori → 15 min, poi raddoppia fino a 24 h), stesso messaggio per utente inesistente, rate limit per IP sui login e per account sul resto, intestazioni di sicurezza (CSP, HSTS in HTTPS, X-Frame-Options) |
-| Autorizzazione | Una sola funzione (`Access`): admin = tutto; membri = permessi per vault + la propria cella; account API = permessi limitati dai loro ambiti. La lista dei vault leggibili è la stessa che riceve la RLS |
-| Admin API | CRUD di utenti, account API, chiavi, passkey, chiavi pubbliche, vault, permessi, sessioni; ricerca nell'audit. Non si può eliminare/sospendere/retrocedere sé stessi né l'ultimo admin |
-| Audit | Ogni login (riuscito o no), ogni modifica di amministrazione e credenziali (scrittura immediata); ogni ricerca e lettura degli account API (scrittura raggruppata, con la classificazione dei risultati) |
-| HTTPS | `scripts/dev-ca.sh`: CA locale + certificato server con SAN |
+| Accounts | Single `principals` table for people and API accounts; roles `admin`, `curator`, `member`; API scopes `read`, `write`, `ingest`, `admin`; clearance 0–3 |
+| TOTP | RFC 6238 implemented in-house (verified against official RFC 6238 and RFC 4226 test vectors). Secret encrypted with the master key (AES-256-GCM, bound to the account). Each code is single-use. 10 recovery codes |
+| Enrollment | Admin creates the user and receives a one-time code (24 h). User redeems it on the enrollment page or via `npm run cb -- enroll <code>` (QR in terminal) |
+| Passkeys | WebAuthn (SimpleWebAuthn 13), "none" attestation, supports usernameless login. Rejects mismatched origins and replayed responses |
+| Signature login | `cb-auth-v1\|user\|nonce\|ts` signed with Ed25519, ECDSA P-256, or an X.509 certificate from the company CA. Single-use nonce (60 s), ts ±60 s. CLI `npm run cb -- login --key` |
+| API keys | `cb_<id>_<secret>`, hash only in the database; expiration, revocation, allowed IPs (CIDR v4/v6), per-account rate limit |
+| Sessions | Random token in `HttpOnly; SameSite=Strict` cookie (plus `Secure` over HTTPS), hash in the database; idle timeout (12 h) and absolute lifetime (7 days); per-session CSRF token (double submit) |
+| Protections | Progressive lockout per username (5 failures → 15 min, doubling up to 24 h), identical error message for non-existent users, per-IP rate limit on login and per-account elsewhere, security headers (CSP, HSTS over HTTPS, X-Frame-Options) |
+| Authorization | Single function (`Access`): admin = everything; members = per-vault permissions + own cell; API accounts = permissions bounded by their scopes. The list of readable vaults is the exact same list passed to RLS |
+| Admin API | CRUD for users, API accounts, keys, passkeys, public keys, vaults, permissions, sessions; audit search. Cannot delete/suspend/demote yourself or the last admin |
+| Audit | Every login (success or failure), every admin and credential change (immediate write); every search and read by API accounts (buffered write, recording result classifications) |
+| HTTPS | `scripts/dev-ca.sh`: local CA + server certificate with SAN |
 
-## Verifica
+## Verification
 
-- 115 test in totale (23 nuovi in `auth`, 11 end-to-end HTTP in `server`), tutti superati, anche ripetendo l'esecuzione sullo stesso database di test.
-- End-to-end via HTTP: i tre metodi di accesso e i codici di recupero; attivazione; CSRF; salvaguardie dell'admin; un membro vede solo i vault concessi (ricerca, lettura, grafo) e perde l'accesso appena il permesso è revocato; un account API vede solo i suoi vault e fino alla sua clearance, non usa l'API di amministrazione, le sue letture sono nell'audit, la chiave revocata smette subito di funzionare.
-- Server reale (`npm start`) e CLI (`key gen`, `login --key`) provati sul database di test.
-- TLS: il server presenta il certificato della CA locale con HSTS; senza la CA il client lo rifiuta.
+- 115 tests total (23 new in `auth`, 11 end-to-end HTTP in `server`), all passing, including repeated runs against the same test database.
+- End-to-end over HTTP: all three login methods and recovery codes; enrollment; admin safeguards; a member sees only granted vaults (search, read, graph) and loses access as soon as permission is revoked; an API account sees only its vaults up to its clearance, cannot use the admin API, its reads appear in the audit log, and a revoked key stops working immediately.
+- Real server (`npm start`) and CLI (`key gen`, `login --key`) tested against the test database.
+- TLS: server presents the local CA certificate with HSTS; without the CA, clients reject it.
 
-## Da sapere
+## Good to know
 
-1. **Antivirus che intercetta il TLS.** Su questa macchina Avast (Web/Mail Shield) intercetta le connessioni HTTPS, anche verso `localhost` e dai container Docker, e sostituisce i certificati che Windows non considera fidati con uno "Avast Untrusted Root". Conseguenze: browser e CLI rifiutano il server finché la CA locale (`data/tls/ca.pem`) non è importata tra le autorità radice fidate di Windows; la CLI Node ha bisogno anche della radice di Avast, oppure di un'eccezione per l'indirizzo del server nell'antivirus. Sui computer aziendali con antivirus simili vale lo stesso: va scritto nella guida di installazione.
-2. **La chiave master protegge anche i segreti TOTP.** Senza `BRAIN_MASTER_KEY` (o `data/.master-key` in sviluppo) nessuno può più accedere con TOTP: va salvata fuori dal server, come per i documenti cifrati.
-3. **Il rate limit è in memoria**, per un processo. Con più istanze del server servirà un contatore condiviso (Postgres o Redis). Il blocco dei login è già in Postgres.
-4. **L'audit non è ancora partizionato per mese** (indice BRIN sul tempo). Il partizionamento e la ritenzione arrivano con il ciclo notturno.
-5. `PUBLIC_URL` fissa l'RP ID delle passkey: cambiarlo in seguito invalida le passkey registrate.
+1. **TLS-intercepting antivirus.** On this machine, Avast (Web/Mail Shield) intercepts HTTPS connections—even to `localhost` and from Docker containers—and replaces certificates Windows does not trust with an "Avast Untrusted Root". Consequence: browsers and the CLI reject the server until the local CA (`data/tls/ca.pem`) is imported into Windows Trusted Root Certification Authorities; the Node CLI also needs the Avast root or an antivirus exception for the server address. The same applies on corporate machines with similar antivirus software: document in the installation guide.
+2. **The master key also protects TOTP secrets.** Without `BRAIN_MASTER_KEY` (or `data/.master-key` in development), nobody can sign in with TOTP anymore: back it up off-server, just like for encrypted documents.
+3. **Rate limiting is in-memory**, per process. Multiple server instances will require a shared counter (Postgres or Redis). Login lockout is already in Postgres.
+4. **The audit table is not yet partitioned by month** (BRIN index on timestamp). Partitioning and retention arrive with the nightly cycle.
+5. `PUBLIC_URL` fixes the passkey RP ID: changing it later invalidates registered passkeys.
 
-# Fase 3 — ingestion e import massivo
+# Phase 3 — Ingestion and bulk import
 
-Data: 2026-10-27
+Date: 2026-10-27
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Parser locali | `@cb/parsers`: PDF (unpdf, pagine, segnala `needs_ocr`), DOCX (mammoth + tabelle), XLSX e CSV (tabelle Markdown, riassunto oltre 200 righe), PPTX (diapositive e note), EML, MSG, MBOX (citazioni rimosse), HTML (Readability), ZIP (limiti contro le zip bomb), codice (simboli come titoli), testo (UTF-8 / Windows-1252). Formato riconosciuto dal contenuto, non dall'estensione |
-| Worker pool | Thread separati (piscina) con timeout per file: un parser bloccato non ferma il server |
-| Sorgenti | L0 cifrato per vault, dedup per hash nel vault, figli (allegati, file dello ZIP) fino a profondità 4 |
-| Pipeline `ingest` | Task durevole con fasi `parse → index → embed → compile`: I1 = chunk e full-text, I2 = embedding, I3 = pagine compilate. Errori permanenti → stato `unsupported` / `failed`, senza nuovi tentativi |
-| Compilatore | Pagina sorgente estrattiva (sempre, senza modello) + agente del modello con i tool `source_read`, `wiki_search`, `wiki_read`, `wiki_write`. `validate` rifiuta pagine senza citazioni, punti di "Stato attuale" senza citazione e citazioni a sorgenti sconosciute |
-| Compilazione su richiesta | Le sorgenti I1/I2 trovate spesso dalle ricerche passano a I3 (contatore `demand`) |
-| Link | Solo http/https, niente credenziali nell'URL, DNS controllato contro indirizzi privati, redirect manuali (max 5), 20 MB, 30 s |
-| Import massivo | Task `import` con fasi di scansione e memorizzazione, tabella `import_files` per la scansione incrementale, glob di inclusione/esclusione, file di sistema saltati, limite di velocità, finestra oraria, pausa/ripresa/annullamento/nuova scansione. Solo cartelle sotto `IMPORT_ROOTS` (percorso reale, niente uscita con link simbolici) |
-| API | Upload multipart, link, elenco e dettaglio sorgenti, originale (solo persone, mai account API), reingest, compila ora, eventi SSE; `/api/admin/imports` |
-| Guardia di rete | `EgressGuard`: ogni connessione in uscita passa da un controllo (database, server dei modelli, `EGRESS_ALLOW`); i link scaricati hanno un permesso valido solo per quella richiesta. Le connessioni rifiutate vanno nell'audit |
+| Local parsers | `@cb/parsers`: PDF (unpdf, pages, flags `needs_ocr`), DOCX (mammoth + tables), XLSX and CSV (Markdown tables, summary beyond 200 rows), PPTX (slides and notes), EML, MSG, MBOX (quoted replies stripped), HTML (Readability), ZIP (zip-bomb limits), code (symbols as headings), text (UTF-8 / Windows-1252). Format detected from content, not file extension |
+| Worker pool | Separate worker threads with per-file timeout: a hung parser cannot stall the server |
+| Sources | Per-vault encrypted L0, per-vault hash deduplication, child sources (attachments, ZIP entries) up to depth 4 |
+| `ingest` pipeline | Durable task with phases `parse → index → embed → compile`: I1 = chunks and full-text, I2 = embeddings, I3 = compiled pages. Permanent errors → `unsupported` / `failed`, no retries |
+| Compiler | Extractive source page (always, no model) + model agent with tools `source_read`, `wiki_search`, `wiki_read`, `wiki_write`. `validate` rejects pages without citations, "Stato attuale" bullets without citations, and citations to unknown sources |
+| On-demand compilation | I1/I2 sources frequently returned by search are promoted to I3 (`demand` counter) |
+| Links | http/https only, no credentials in URL, DNS checked against private addresses, manual redirects (max 5), 20 MB, 30 s |
+| Bulk import | `import` task with scan and store phases, `import_files` table for incremental scanning, include/exclude globs, system files skipped, rate limit, time window, pause/resume/cancel/rescan. Folders restricted under `IMPORT_ROOTS` (real path, no symlink escape) |
+| API | Multipart upload, links, source list and detail, original download (people only, never API accounts), reingest, compile now, SSE events; `/api/admin/imports` |
+| Network guard | `EgressGuard`: every outgoing connection passes a check (database, model servers, `EGRESS_ALLOW`); downloaded links receive a permit scoped to that single request. Blocked connections are written to the audit log |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| Corpus di prova, 20 file per 13 formati | 260 file analizzati senza errori, con i marcatori e i figli attesi ([test](../../packages/parsers/test/parsers.test.ts)) |
-| Kill durante la compilazione → ripresa senza duplicati | SUPERATO: 72 sorgenti, 7 SIGKILL, 33 task ripresi, 0 pagine mancanti o duplicate, la pagina condivisa ha 1 copia e 85 versioni ([rapporto](phase3-crash.md)) |
-| Import di 1 milione di file con avanzamento corretto | SUPERATO: 1.000.000 salvati, 0 duplicati, 0 errori, tutti indicizzati (I1), avanzamento crescente e somme corrette, 134,8 min, 4,4 GB nel database ([rapporto](phase3-import-1000000.md)) |
-| Nessuna connessione in uscita non consentita | Test della guardia (host non consentito rifiutato, `allowFor` limitato alla richiesta), link verso indirizzi interni rifiutati, server reale avviato con la guardia attiva |
+| Test corpus, 20 files across 13 formats | 260 files parsed with no errors, matching expected markers and child sources ([test](../../packages/parsers/test/parsers.test.ts)) |
+| Kill during compilation → resume without duplicates | PASS: 72 sources, 7 SIGKILLs, 33 recovered tasks, 0 missing or duplicate pages, shared page has 1 copy and 85 versions ([report](phase3-crash.md)) |
+| Import of 1 million files with accurate progress | PASS: 1,000,000 stored, 0 duplicates, 0 errors, all indexed (I1), monotonically increasing progress and matching sums, 134.8 min, 4.4 GB in the database ([report](phase3-import-1000000.md)) |
+| No unauthorized outgoing connections | Guard tests (disallowed host blocked, `allowFor` scoped to request), links to internal addresses rejected, real server started with guard active |
 
-Test: 154 in totale, tutti superati (due esecuzioni sullo stesso database).
+Tests: 154 total, all passing (two consecutive runs on the same database).
 
-## Prestazioni dell'import
+## Import performance
 
-| Prova | File/s |
+| Run | Files/s |
 |---|---|
-| 20.000 file, memorizzazione in serie | 60 |
-| Memorizzazione in parallelo (16 per task), versione del vault aggiornata fuori dalla transazione | 145 |
-| 4 processi worker invece di 2 | 128 (nessun vantaggio: il collo di bottiglia è il commit) |
-| `synchronous_commit = off` nel pool dei worker | 535 |
-| 1.000.000 di file (media) | 125 |
+| 20,000 files, serial storage | 60 |
+| Parallel storage (16 per task), vault version updated outside transaction | 145 |
+| 4 worker processes instead of 2 | 128 (no gain: commit is the bottleneck) |
+| `synchronous_commit = off` on the worker pool | 535 |
+| 1,000,000 files (average) | 125 |
 
-Durante l'import da 1 milione la velocità scende da circa 460 file/s (primi minuti) a circa 90 file/s (ultimi minuti). La causa non è ancora misurata. Ipotesi: tabelle `tasks` e `task_events` che crescono (1 task per file), indice GIN del full-text di un'unica partizione che riceve tutti i chunk, memorizzazione e indicizzazione che condividono gli stessi posti di lavoro. Da profilare in fase 8 (`pg_stat_statements`, `EXPLAIN ANALYZE`); possibili rimedi: task di indicizzazione a lotti invece di un task per file, pulizia dei task conclusi.
+During the 1-million-file import, throughput drops from ~460 files/s (first minutes) to ~90 files/s (last minutes). The root cause has not yet been measured. Hypotheses: growing `tasks` and `task_events` tables (1 task per file), single-partition full-text GIN index receiving all chunks, storage and indexing competing for the same worker slots. To be profiled in Phase 8 (`pg_stat_statements`, `EXPLAIN ANALYZE`); candidate fixes: batched indexing tasks instead of one task per file, cleanup of completed tasks.
 
-## Decisioni
+## Decisions
 
-1. **Commit asincroni solo per i worker.** Le fasi dei task sono idempotenti: se il database si ferma, gli ultimi commit persi vengono rifatti. Login, sessioni, admin e audit restano sul pool con commit sincrono.
-2. **La pagina sorgente è estrattiva.** Ogni sorgente ha subito una pagina citabile senza modello; il modello aggiunge solo pagine di entità, con citazioni obbligatorie.
-3. **L'originale non esce mai verso gli account API.** L'agente cloud riceve solo testo compilato (invariante 1).
+1. **Asynchronous commits for workers only.** Task phases are idempotent: if the database stops, the last lost commits are simply replayed. Login, sessions, admin, and audit remain on the synchronous-commit pool.
+2. **The source page is extractive.** Every source immediately gets a citable page without invoking a model; the model only adds entity pages, with mandatory citations.
+3. **Originals are never exposed to API accounts.** Cloud agents receive compiled text only (invariant 1).
 
-## Non ancora fatto
+## Not yet implemented
 
-- OCR: le immagini e i PDF scansionati sono segnalati (`ocr_unavailable`, `needs_ocr`), non letti.
-- Sidecar docling (PDF complessi) e readpst (PST); formati legacy `.doc` / `.xls`.
-- Nessun generatore di file MSG: il parser MSG non ha ancora un test automatico.
-- Compilazione con il modello reale non provata: l'host dei modelli è spento. Prova prevista in fase 6 con l'eval di recupero.
+- OCR: images and scanned PDFs are flagged (`ocr_unavailable`, `needs_ocr`), not read.
+- Docling (complex PDFs) and readpst (PST) sidecars; legacy `.doc` / `.xls` formats.
+- No MSG file generator: the MSG parser does not yet have an automated test.
+- Compilation with the real model has not been tested: the model host is powered off. Planned for Phase 6 alongside the retrieval eval.
 
-# Fase 4 — interfaccia utente stile Obsidian
+# Phase 4 — Obsidian-style user interface
 
-Data: 2026-10-28
+Date: 2026-10-28
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Accesso | TOTP, passkey (anche senza nome utente), codice di recupero, attivazione con QR e codici di recupero. Gestione di passkey e sessioni nella pagina «Il mio account» |
-| Shell | Barra delle azioni, barra laterale (vault, inbox, «Da rivedere», preferiti, recenti, cartelle per tipo), schede con cronologia propria, due pannelli affiancati, pannello dei dettagli. Lo stato dell'area di lavoro resta nel browser; l'indirizzo mostra la vista attiva (`#/p/<id>`, `#/cerca?q=…`) |
-| Tastiera | `Ctrl K` comandi, `Ctrl O` apri una pagina, `Ctrl Maiusc F` cerca, `Ctrl \` dividi, `Alt ←/→` cronologia, `Ctrl E` modifica, `Ctrl S` salva, `Alt N` nuova pagina, `Alt T`/`Alt W` schede, `Ctrl B` barre laterali. Le scorciatoie che il browser riserva (`Ctrl T`, `Ctrl W`, `Ctrl N`) restano al browser |
-| Lettura | `[[link]]` risolti con la tabella dei link (anche verso vault diversi, se leggibili), link mancanti tratteggiati con creazione al clic, citazioni numerate con la fonte al passaggio del mouse e apertura della sorgente al punto citato, callout, liste di compiti, ancore di sezione e di blocco, elenco «Fonti» |
-| Pannello dei dettagli | Struttura, backlink e menzioni non collegate (full-text del titolo e degli alias), grafo locale (profondità 1–2), proprietà |
-| Anteprime | Al passaggio del mouse su un link: lettura con budget (260 token) della pagina collegata; la pagina è anche prelevata in anticipo |
-| Editor | CodeMirror 6 sul file Markdown completo, completamento di `[[` da titoli e alias del vault, anteprima affiancata, `Ctrl S`; un salvataggio concorrente risponde 409 e l'utente sceglie se ricaricare o sovrascrivere. Storico delle versioni con differenze riga per riga |
-| Ricerca | Filtri per vault e tipo applicati dal server prima del ranking; faccette per genere (pagina/documento) e livello (I1/I2/I3); anteprima dei passaggi trovati; navigazione da tastiera |
-| Grafo | Canvas con simulazione di forze, zoom, spostamento, trascinamento, tastiera; filtri per vault e tipo; caricamento progressivo (prima le pagine più collegate) |
-| Sorgente | Originale mostrato dal browser (PDF, immagini, testo: `?inline=true`, framing solo dalla stessa origine, sandbox per immagini e testo) accanto al testo estratto, con la parte citata evidenziata; rielabora, compila ora |
-| Caricamento | Trascinamento ovunque nella finestra, file o link, scelta di vault e classificazione con l'avviso sull'agente cloud prima dell'invio, avanzamento del trasferimento, stato di ogni documento dagli eventi del server |
-| Avvisi D1 | Informativa al primo accesso (non si chiude senza conferma, conferma nell'audit), segno «☁ Consultabile dall'agente cloud» quando almeno un account API attivo può leggere la pagina, pannello «Cosa ha letto l'agente cloud» con le letture delle pagine della propria cella |
-| Server | Rotte `routes/workspace.ts` e letture `brain/src/browse.ts` (sempre con `withReader`), migrazione 008, compressione brotli/gzip, file dell'app con cache di un anno (nomi con hash), `robots.txt` che esclude l'indicizzazione |
+| Login | TOTP, passkeys (including usernameless), recovery code, enrollment with QR and recovery codes. Passkey and session management on the "My account" page |
+| Shell | Action bar, sidebar (vaults, inbox, "To review", favorites, recent, folders by type), tabs with per-tab history, two side-by-side panes, detail panel. Workspace state persists in the browser; URL hash reflects the active view (`#/p/<id>`, `#/cerca?q=…`) |
+| Keyboard | `Ctrl K` commands, `Ctrl O` open page, `Ctrl Shift F` search, `Ctrl \` split, `Alt ←/→` history, `Ctrl E` edit, `Ctrl S` save, `Alt N` new page, `Alt T`/`Alt W` tabs, `Ctrl B` sidebars. Browser-reserved shortcuts (`Ctrl T`, `Ctrl W`, `Ctrl N`) remain with the browser |
+| Reading | `[[links]]` resolved via the links table (including cross-vault links when readable), missing links styled dashed with click-to-create, numbered citations showing the source on hover and opening the source at the cited location, callouts, task lists, heading and block anchors, "Sources" list |
+| Detail panel | Outline, backlinks and unlinked mentions (full-text search of title and aliases), local graph (depth 1–2), properties |
+| Previews | Hovering a link shows a budgeted read (260 tokens) of the target page; the page is also prefetched |
+| Editor | CodeMirror 6 on the full Markdown file, `[[` autocomplete from vault titles and aliases, side-by-side preview, `Ctrl S`; concurrent save returns 409 and lets the user reload or overwrite. Version history with line-by-line diffs |
+| Search | Server-side vault and type filters applied before ranking; facets by kind (page/document) and level (I1/I2/I3); matching passage previews; keyboard navigation |
+| Graph | Force-directed canvas, zoom, pan, drag, keyboard navigation; vault and type filters; progressive loading (most connected pages first) |
+| Source viewer | Original rendered by the browser (PDF, images, text: `?inline=true`, same-origin framing only, sandboxed for images and text) alongside extracted text with the cited passage highlighted; reprocess, compile now |
+| Upload | Drag-and-drop anywhere in the window, files or links, vault and classification picker with the cloud-agent notice before submission, upload progress, live document status via server events |
+| D1 notices | First-login disclosure (cannot be dismissed without confirmation, confirmation logged in audit), "☁ Readable by cloud agent" badge whenever at least one active API account can read the page, "What the cloud agent read" panel listing reads of pages in the user's cell |
+| Server | Routes in `routes/workspace.ts` and reads in `brain/src/browse.ts` (always via `withReader`), migration 008, brotli/gzip compression, 1-year cache on hashed app assets, `robots.txt` disallowing indexing |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| Test Playwright dei flussi principali nei 4 temi | 33 test (8 flussi × 4 temi + accesso), tutti superati in due esecuzioni consecutive: accesso con TOTP e informativa, codice sbagliato, quick switcher, wikilink, anteprima, cronologia, ricerca a faccette, modifica con completamento e salvataggio, caricamento con eventi in tempo reale, pannelli divisi, grafo, palette, controllo axe WCAG 2.1 AA di 5 viste |
-| Lighthouse ≥ 90 | Prestazioni 92–99, accessibilità 100, best practice 100 su accesso, inizio, pagina, ricerca, grafo e inbox (desktop, tema carta). SEO 63 per scelta: `robots.txt` esclude un'applicazione interna dai motori di ricerca |
-| Apertura pagina < 100 ms percepiti | 1,6–1,9 ms dal clic alla pagina disegnata per una pagina già vista o sorvolata (cache e prelievo anticipato); una pagina nuova costa una richiesta (`/api/pages/:id/full`, decine di ms in LAN) con lo scheletro della pagina mostrato subito |
+| Playwright tests of primary flows across all 4 themes | 33 tests (8 flows × 4 themes + login), all passing across two consecutive runs: TOTP login and disclosure, wrong code, quick switcher, wikilinks, hover preview, history, faceted search, editing with autocomplete and save, upload with live events, split panes, graph, command palette, axe WCAG 2.1 AA check across 5 views |
+| Lighthouse ≥ 90 | Performance 92–99, accessibility 100, best practices 100 across login, home, page, search, graph, and inbox (desktop, paper theme). SEO 63 by design: `robots.txt` excludes an internal app from search engines |
+| Perceived page open < 100 ms | 1.6–1.9 ms from click to painted page for a previously visited or hovered page (cache and prefetch); a cold page costs one request (`/api/pages/:id/full`, tens of ms on LAN) with a page skeleton shown immediately |
 
-Test: 166 unitari e di database (8 nuovi sul renderer Markdown, 4 sulle API dell'interfaccia), tutti superati. Bundle iniziale 248 KB (91 KB compressi); editor (566 KB) e grafo (21 KB) si caricano alla prima apertura o quando il browser è inattivo.
+Tests: 166 unit and database tests (8 new on the Markdown renderer, 4 on workspace APIs), all passing. Initial bundle 248 KB (91 KB compressed); editor (566 KB) and graph (21 KB) load on first open or when the browser is idle.
 
-Schermate: [docs/ui/](../ui/) (`SCREENSHOTS=1 npm run e2e` le rigenera).
+Screenshots: [docs/ui/](../ui/) (`SCREENSHOTS=1 npm run e2e` regenerates them).
 
-## Problemi trovati dai test e corretti
+## Issues found by tests and fixed
 
-1. **Link tra vault.** Il motore risolve un `[[link]]` dentro il vault della pagina; un link da «Tecnico» a un cliente di «Clienti» restava non risolto. Le letture ora risolvono questi link sui titoli e alias dei vault leggibili: pagina, backlink, conteggio, grafo globale e locale.
-2. **Quick switcher troppo veloce.** Con `Invio` premuto prima della risposta del server si apriva la riga della ricerca precedente. Ora `Invio` aspetta i risultati della query scritta.
-3. **Contrasto.** `--text-dim` e i colori dei link dei temi originali sono sotto 4,5:1 per il testo piccolo (fino a 3,19:1 nel tema notte). I blocchi copiati restano uguali; `base.css` sposta questi colori verso `--text-main` quanto basta per l'AA in tutti i temi. Ridisegnati i segni di livello I1/I2/I3 e l'evidenziazione dei termini cercati.
-4. **Estratti della ricerca.** Il server restituisce `snippet` con i termini tra «»; l'interfaccia li rende sicuri (testo escapato, poi `<mark>`).
+1. **Cross-vault links.** The engine resolved a `[[link]]` inside the page's own vault; a link from "Technical" to a client in "Clients" stayed unresolved. Reads now resolve these links against titles and aliases of all readable vaults: page view, backlinks, counts, global and local graph.
+2. **Quick switcher too fast.** Pressing `Enter` before the server responded opened the row from the previous search. `Enter` now waits for results matching the typed query.
+3. **Contrast.** `--text-dim` and link colors in the original themes fell below 4.5:1 for small text (down to 3.19:1 in the night theme). Copied token blocks remain unchanged; `base.css` shifts those colors toward `--text-main` just enough to pass AA in all themes. Redesigned I1/I2/I3 level badges and search-term highlighting.
+4. **Search snippets.** The server returns `snippet` with terms wrapped in `«»`; the UI renders them safely (escaped text, then `<mark>`).
 
-## Da sapere
+## Good to know
 
-1. **Schermate al posto dei mockup.** Il piano (§9.3) chiedeva mockup da approvare prima di sviluppare le viste. Le viste sono state costruite direttamente sul design system della fase 0; le schermate reali in `docs/ui/` servono per la revisione.
-2. **Editor con anteprima affiancata**, non «live preview» in linea come Obsidian: CodeMirror mostra il Markdown, l'anteprima accanto si aggiorna mentre si scrive.
-3. **Embedding delle pagine scritte a mano.** Il testo modificato è subito cercabile per parole chiave; i vettori delle pagine modificate dall'editor arrivano con il ciclo notturno (fase 5), perché oggi l'indicizzatore gira solo nella pipeline delle sorgenti.
-4. **Accesso con firma** solo dalla riga di comando (`npm run cb -- login --key`): il browser non ha accesso alle chiavi private.
-5. **Test con il browser installato.** Playwright usa Edge (`E2E_CHANNEL=chrome` per Chrome): nessun browser scaricato. I test usano il database di sviluppo e cancellano i loro dati alla fine.
-6. **In sviluppo** le sorgenti restano a I1: il modello di embedding finto non ha l'identità del modello configurato e il dispatcher rifiuta di mescolare vettori (invariante 3). È il comportamento voluto.
+1. **Screenshots instead of mockups.** The plan (§9.3) called for mockups to approve before building views. Views were built directly on the Phase 0 design system; real screenshots in `docs/ui/` serve for review.
+2. **Side-by-side preview editor**, not inline "live preview" like Obsidian: CodeMirror displays Markdown while the adjacent preview updates as you type.
+3. **Embeddings for hand-written pages.** Edited text is immediately searchable by keywords; vectors for editor-modified pages arrive with the nightly cycle (Phase 5), since the indexer currently runs only in the source pipeline.
+4. **Signature login** is CLI-only (`npm run cb -- login --key`): browsers have no access to private keys.
+5. **Tests use the installed browser.** Playwright uses Edge (`E2E_CHANNEL=chrome` for Chrome): no browser downloaded. Tests run against the development database and clean up their data at the end.
+6. **In development**, sources remain at I1: the mock embedding model does not match the configured model identity, and the dispatcher refuses to mix vectors (invariant 3). This is intentional.
 
-# Fase 5 — alveare e ciclo notturno
+# Phase 5 — Hive and nightly cycle
 
-Data: 2026-10-28
+Date: 2026-10-28
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Claims | `@cb/hive/claims.ts`: ogni punto dello «Stato attuale» diventa un'affermazione (`Etichetta: valore`, oppure una quantità come «250 postazioni»; il resto è una nota che non va mai in conflitto). Etichette con lo stesso significato hanno un solo predicato (`numero di postazioni` = `postazioni`); i valori sono normalizzati (`1.250` = `1250`, i wikilink diventano testo). La sincronizzazione legge solo le pagine cambiate (`pages.claims_at`) e ritira i punti tolti |
-| Celle e spazi | `hive_feeds`: quali celle alimentano uno spazio e per quali tipi di pagina (predefinito: entità). Configurazione con `PUT /api/admin/vaults/:id/feeds` |
-| Promozione | Le pagine delle celle sullo stesso soggetto sono unite per titolo e alias. Un valore → una riga con le fonti (`· 2 fonti concordi`); più valori → blocco `> [!conflict]` e voce nella coda. Ogni frase cita la pagina d'origine `^[pagina#blocco]`; sezione «Provenienza» con celle e pagine. Le pagine `privato` non escono dalla cella; la pagina d'alveare prende la classificazione più alta delle sue fonti. La pagina è ricostruita ogni volta dai claims attivi: un'informazione ritirata nella cella sparisce dall'alveare, un soggetto senza claims porta via la pagina |
-| Coda dei curatori | `curator_items`: conflitti, possibili duplicati, valori con fiducia bassa (sotto 0,6), contraddizioni dentro una cella. Una decisione (un valore, un valore scritto dal curatore, «sono tutti validi») aggiorna subito la pagina e vale alle promozioni successive, finché i valori nelle celle non cambiano: allora si apre una voce nuova. I duplicati si uniscono dalla coda (alias + redirect, nessun link rotto). Permesso `curate` sullo spazio; ogni decisione va nell'audit |
-| Ciclo notturno | Task durevole per vault e notte con i 12 passi del piano (vedi sotto). Ogni chiamata della fase fa un lotto limitato e salva passo, cursore e rapporto: un worker ucciso riprende dal lotto successivo. Lavora solo nella finestra (`DREAM_WINDOW`, predefinita 22:00–06:00) e nel budget per vault e notte (`DREAM_BUDGET_MINUTES`, `DREAM_BUDGET_TOKENS`); poi dorme fino alla notte dopo e riprende dallo stesso punto |
-| Scheduler | Un task che si sveglia all'inizio di ogni finestra: un ciclo per vault (prima le celle, poi gli spazi), nessun secondo ciclo per un vault ancora in pausa, pulizia globale (task conclusi oltre 30 giorni, audit oltre 400 giorni) |
-| Modelli locali | Qwen3-Embedding-0.6B e Qwen3-Reranker-0.6B (Q8_0) in `data/models/`, avviati e sorvegliati dal server con il llama-server già usato nello spike D (CPU, 8 thread) |
-| Interfaccia | «Coda dei curatori» (scegli un valore, scrivine uno, tieni tutti; unisci i duplicati), «Ciclo notturno» (rapporto per vault e notte, dettagli per passo), segno «Alveare · N celle» sulle pagine, fonti di celle non accessibili mostrate come tali (non come errori), pagine generate in sola lettura |
+| Claims | `@cb/hive/claims.ts`: every bullet under "Stato attuale" becomes a claim (`Label: value`, or a quantity such as "250 seats"; anything else is a note that never triggers a conflict). Synonymous labels map to a single predicate (`number of seats` = `seats`); values are normalized (`1.250` = `1250`, wikilinks become plain text). Sync reads only changed pages (`pages.claims_at`) and retracts removed bullets |
+| Cells and spaces | `hive_feeds`: defines which cells feed a space and for which page types (default: entity). Configured via `PUT /api/admin/vaults/:id/feeds` |
+| Promotion | Cell pages on the same subject are merged by title and aliases. One value → a single line with sources (`· 2 agreeing sources`); multiple values → a `> [!conflict]` block and a curator queue item. Every sentence cites its origin page `^[page#block]`; "Provenance" section lists cells and pages. `privato` (private) pages never leave the cell; the hive page inherits the highest classification of its sources. The page is rebuilt every time from active claims: a retracted fact in a cell disappears from the hive, and a subject with no remaining claims removes the hive page |
+| Curator queue | `curator_items`: conflicts, possible duplicates, low-confidence values (below 0.6), contradictions within a cell. A decision (pick a value, enter a custom value, "all are valid") updates the page immediately and carries across subsequent promotions until cell values change—at which point a new item opens. Duplicates are merged from the queue (alias + redirect, no broken links). Requires `curate` permission on the space; every decision is audited |
+| Nightly cycle | Durable task per vault and night running the 12 steps from the plan (see below). Each phase call processes a bounded batch and saves step, cursor, and report: a killed worker resumes from the next batch. Runs only within the configured window (`DREAM_WINDOW`, default 22:00–06:00) and per-vault nightly budget (`DREAM_BUDGET_MINUTES`, `DREAM_BUDGET_TOKENS`); otherwise sleeps until the next night and resumes from the same spot |
+| Scheduler | A task that wakes at the start of each window: one cycle per vault (cells first, then spaces), never spawns a second cycle for a vault still paused, plus global cleanup (completed tasks older than 30 days, audit entries older than 400 days) |
+| Local models | Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B (Q8_0) in `data/models/`, started and supervised by the server with the same llama-server used in Spike D (CPU, 8 threads) |
+| UI | "Curator queue" (pick a value, enter a value, keep all; merge duplicates), "Nightly cycle" (report per vault and night, per-step details), "Hive · N cells" badge on hive pages, sources from inaccessible cells displayed as such (not as errors), generated pages read-only |
 
-### I 12 passi
+### The 12 steps
 
-| # | Passo | Cosa fa | Modello |
+| # | Step | What it does | Model |
 |---|---|---|---|
-| 1 | reparse | Sorgenti lette da una versione vecchia del parser → nuova elaborazione | — |
-| 2 | backlog | Vettori mancanti (sorgenti e pagine scritte a mano), compilazione I3 delle sorgenti richieste (`DREAM_COMPILE_PER_NIGHT`) | embedding locale |
-| 3 | dedup | Titoli simili (trigrammi) dello stesso tipo: stessa entità a meno della forma giuridica → unione; altrimenti giudica il modello; se non è sicuro (< 0,9) → coda | chat, JSON |
-| 4 | crosslink | Prima menzione non collegata di un titolo o alias → `[[link]]` (mai in codice, titoli, link, citazioni; nomi ambigui saltati) | — |
-| 5 | lint | Claims sincronizzati; orfane, link rotti, pagine più vecchie delle loro sorgenti, contraddizioni → pagina `_inbox/manutenzione.md` e coda | — |
-| 6 | tldr | Sintesi delle pagine cambiate senza `tldr`; scartata se contiene numeri che non sono nella pagina | chat, JSON |
-| 7 | promote | Promozione cella → alveare (solo negli spazi con celle collegate) | — |
-| 8 | importance | `ln(1+backlink) + 0,7·ln(1+letture in 30 giorni) + recenza` | — |
-| 9 | indexes | Indice per categoria e `llms.txt` (le pagine più importanti per prime) in `vault_indexes`; `GET /api/vaults/:id/index/llms` | — |
-| 10 | database | `VACUUM (ANALYZE)` della partizione dei chunk se più del 10% delle righe è morto; `ANALYZE` se più vecchio di 7 giorni | — |
-| 11 | backup | Lettura e verifica dell'hash di 5 originali a caso dal raw store cifrato; pgBackRest arriva in fase 8 | — |
-| 12 | report | Riga in `vault_log` (tipo `dream`) e `dream_runs` concluso | — |
+| 1 | `reparse` | Sources parsed by an older parser version → re-ingest | — |
+| 2 | `backlog` | Missing vectors (sources and hand-written pages), I3 compilation of demanded sources (`DREAM_COMPILE_PER_NIGHT`) | local embed |
+| 3 | `dedup` | Similar titles (trigrams) of the same type: same entity up to legal form → auto-merge; otherwise model judges; if uncertain (< 0.9) → curator queue | chat, JSON |
+| 4 | `crosslink` | First unlinked mention of a title or alias → `[[link]]` (never inside code, headings, links, or citations; ambiguous names skipped) | — |
+| 5 | `lint` | Sync claims; orphans, broken links, pages older than their sources, contradictions → `_inbox/manutenzione.md` and queue | — |
+| 6 | `tldr` | Summary of changed pages missing `tldr`; discarded if it contains numbers not present in the page | chat, JSON |
+| 7 | `promote` | Cell → hive promotion (only in spaces with linked cells) | — |
+| 8 | `importance` | `ln(1+backlinks) + 0.7·ln(1+30-day reads) + recency` | — |
+| 9 | `indexes` | Category index and `llms.txt` (most important pages first) in `vault_indexes`; `GET /api/vaults/:id/index/llms` | — |
+| 10 | `database` | `VACUUM (ANALYZE)` on the chunk partition if > 10% dead tuples; `ANALYZE` if older than 7 days | — |
+| 11 | `backup` | Read and hash-verify 5 random originals from the encrypted raw store; pgBackRest arrives in Phase 8 | — |
+| 12 | `report` | Row in `vault_log` (type `dream`) and `dream_runs` marked done | — |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| Due celle con informazioni concordi e discordi → pagina d'alveare con provenienza e conflitto aperto | SUPERATO ([test](../../packages/hive/test/hive.test.ts)): «Postazioni: 250 ^[A] ^[B] · 2 fonti concordi», blocco di conflitto sul referente tecnico con i valori di ciascuna cella, voce aperta in coda; decisione del curatore applicata subito e mantenuta; valore nuovo in una cella → la decisione vecchia non vale più e si apre un conflitto nuovo; informazione ritirata → sparisce; pagine private e tipi non collegati non promossi; promozione ripetuta senza nuove versioni |
-| Ciclo interrotto → ripresa la notte dopo | SUPERATO ([test](../../packages/hive/test/dream.test.ts)): con un orologio simulato e budget di 60 minuti il ciclo si ferma a metà, dorme fino alle 22:00 del giorno dopo (`dream_runs` in pausa sul passo giusto), riprende da lì e conclude; i passi già fatti non si ripetono (un duplicato unito una volta, un link aggiunto, una sintesi); rapporto in `vault_log`, indici generati; lo spazio promuove l'azienda unita |
+| Two cells with agreeing and disagreeing facts → hive page with provenance and open conflict | PASS ([test](../../packages/hive/test/hive.test.ts)): "Postazioni: 250 ^[A] ^[B] · 2 agreeing sources", conflict block on the technical contact with each cell's value, open item in the queue; curator decision applied immediately and preserved; new value in a cell → old decision expires and a new conflict opens; retracted fact → disappears; private pages and unlinked types not promoted; repeated promotion creates no spurious versions |
+| Interrupted cycle → resumes the next night | PASS ([test](../../packages/hive/test/dream.test.ts)): with a simulated clock and 60-minute budget, the cycle stops mid-way, sleeps until 22:00 the next day (`dream_runs` paused on the exact step), resumes from there and finishes; completed steps do not repeat (duplicate merged once, link added once, summary written once); report in `vault_log`, indexes generated; space promotes the merged company |
 
-Altre prove: API dei curatori via HTTP (solo chi cura vede e decide, unione con link aggiornati, celle collegate solo dagli admin, pagine generate che rifiutano le modifiche con 409); test Playwright della coda nei 4 temi (37 test in tutto, superati).
+Additional checks: Curator HTTP API (only curators see and decide, merge updates links, linked cells editable by admins only, generated pages reject edits with 409); Playwright tests of the queue across all 4 themes (37 tests total, passing).
 
-Prova con i modelli reali sui dati dimostrativi: il ciclo della cella ha calcolato i vettori con l'embedding locale e scritto una sintesi con il modello di chat da 27B (252 token); il ciclo dello spazio «Clienti» ha confermato 12 pagine d'alveare senza nuove versioni e 1 conflitto aperto (l'altro era stato deciso dall'interfaccia).
+Real-model run on demo data: the cell cycle computed vectors with local embeddings and wrote a summary with the 27B chat model (252 tokens); the "Clients" space cycle confirmed 12 hive pages with no new versions and 1 open conflict (the other had been decided in the UI).
 
-## Problemi trovati e corretti
+## Issues found and fixed
 
-1. **Il modello di chat ragionava fino a esaurire i token.** Qwen3.8 ha una modalità di ragionamento: con 300 token di limite restituiva una risposta vuota (`finish_reason: length`); `/no_think` nel testo non basta. `ChatRequest.thinking: false` manda `chat_template_kwargs.enable_thinking = false` a llama-server: la sintesi arriva in 55 token. Il compilatore della fase 3 continua a usare il ragionamento.
-2. **Microsecondi persi.** Un parametro `timestamptz` passa da una `Date` di JavaScript (millisecondi): `claims_at` risultava sempre più vecchio di `updated_at` e ogni notte rileggeva tutte le pagine. Il tempo ora torna al database come testo.
-3. **Soglia dei trigrammi per connessione.** `set_limit` vale per la connessione: soglia e query della deduplica ora stanno nella stessa transazione.
-4. **Modifiche perse.** Le pagine d'alveare mostravano «Modifica», ma la promozione le riscrive: ora sono in sola lettura nell'API e nell'interfaccia.
+1. **Chat model spent its entire token budget on reasoning.** Qwen3.8 has a reasoning mode: with a 300-token limit it returned an empty answer (`finish_reason: length`); `/no_think` in the prompt is not enough. `ChatRequest.thinking: false` sends `chat_template_kwargs.enable_thinking = false` to llama-server: the summary arrives in 55 tokens. The Phase 3 compiler keeps reasoning enabled.
+2. **Lost microseconds.** A `timestamptz` parameter passed through a JavaScript `Date` (millisecond precision): `claims_at` always appeared older than `updated_at`, causing every page to be re-read every night. Timestamps are now passed back to the database as text.
+3. **Per-connection trigram threshold.** `set_limit` is connection-scoped: setting the threshold and running the dedup query now stay in the same transaction.
+4. **Lost edits.** Hive pages showed an "Edit" button, even though promotion overwrites them: they are now read-only in both the API and the UI.
 
-## Da sapere
+## Good to know
 
-1. **Estrazione deterministica dei claims.** Funziona sulle pagine scritte con la convenzione `Etichetta: valore` del compilatore. Le frasi libere diventano note, mai conflitti. Un'estrazione con il modello per le frasi libere è possibile, ma renderebbe i claims meno stabili da una notte all'altra.
-2. **La promozione rilegge tutti i claims dello spazio** a ogni lotto. Va bene fino a decine di migliaia di soggetti; oltre servirà un indice per soggetto e lotti per soggetto.
-3. **REINDEX degli HNSW e partizioni future** non sono fatti: una partizione per vault nasce con il vault; la degradazione degli indici vettoriali sarà misurata in fase 8.
-4. **Dati dimostrativi**: le schede dei clienti sono ora nelle celle di Nome CognomeBBB e di Nome CognomeIII; lo spazio «Clienti» le riceve con la promozione (2 conflitti voluti nella coda di Nome CognomeBBB). `npx tsx scripts/dream-now.ts demo-cella` avvia un ciclo subito.
-5. **Configurazione locale cambiata**: in `.env` `LOCAL_MODELS_ENABLED=true` e `LOCAL_LLAMA_BIN` puntano al llama-server di Docker Desktop. I modelli sono in `data/models/` (ignorata da git).
+1. **Deterministic claim extraction.** Works on pages written with the compiler's `Label: value` convention. Free-form sentences become notes and never trigger conflicts. Model-based extraction for free-form text is possible, but would make claims less stable from night to night.
+2. **Promotion re-reads all claims of the space** on each batch. Fine up to tens of thousands of subjects; beyond that, a per-subject index and per-subject batching will be needed.
+3. **HNSW `REINDEX` and future partitions** are not yet implemented: each vault gets its partition at creation; vector index degradation will be measured in Phase 8.
+4. **Demo data**: client sheets now live in the cells of `Nome CognomeBBB` and `Nome CognomeIII`; the "Clients" space receives them via promotion (2 intentional conflicts in `Nome CognomeBBB`'s queue). `npx tsx scripts/dream-now.ts demo-cella` triggers a cycle immediately.
+5. **Local configuration updated**: in `.env`, `LOCAL_MODELS_ENABLED=true` and `LOCAL_LLAMA_BIN` point to Docker Desktop's llama-server. Models live in `data/models/` (git-ignored).
 
-# Fase 6 — server MCP, skill e plugin per l'agente cloud
+# Phase 6 — MCP server, skills, and plugin for the cloud agent
 
-Data: 2026-10-28
+Date: 2026-10-28
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Server MCP | `@cb/mcp`, montato su `POST /mcp` (streamable HTTP senza sessione: ogni richiesta crea un server legato all'account, qualunque processo risponde). Solo account API con chiave Bearer e ambito `read`. SDK ufficiale `@modelcontextprotocol/sdk` 1.32.1 |
-| 9 tool | `brain_overview`, `brain_search`, `brain_read` (pagine e documenti non compilati, a budget), `brain_neighbors`, `brain_timeline` (entità o periodo), `brain_source` (testo estratto di una citazione, mai il file), `brain_ask` (risposta del modello locale con citazioni, citazioni a id non forniti segnalate), `brain_capture` (nota nella cartella `inbox/`), `brain_propose_edit` (proposta in coda ai curatori). Ogni elemento dice il suo costo in token; ogni tool accetta un budget |
-| Resource e prompt | `brain://<vault>/index`, `brain://<vault>/llms.txt`, `brain://<vault>/page/<id>`; prompt `cosa-sappiamo-di`, `stato-cliente`, `prepara-riunione` |
-| Filtro di classificazione | Il lettore MCP ha clearance al massimo «interno» (`MCP_MAX_CLASSIFICATION`), qualunque sia quella dell'account; RLS la applica di nuovo. Gli indici per agenti sono generati per il lettore sotto RLS: la copia salvata dal ciclo notturno (con tutte le pagine) non esce mai, né via MCP né via REST |
-| Audit | Letture nel log raggruppato: `page.read` (alimenta «Cosa ha letto l'agente cloud»), `search`, `source.read`, `mcp.<tool>`, tutte con `via: mcp`. Scritture (`mcp.capture`, `mcp.propose_edit`) e approvazioni (`curator.apply`) scritte subito |
-| Proposte di modifica | Nuovo tipo `proposal` nella coda dei curatori (migrazione 010): differenze riga per riga, «Approva e applica» (serve il permesso di scrittura sul vault) o «Rifiuta». Se la pagina cambia dopo la proposta, la proposta decade |
-| Skill e plugin | `skills/hivevault-query` (flusso overview → search → read a budget → neighbors/timeline → source; come citare; quando dire che la memoria non lo sa), `skills/hivevault-ingest` con il client `scripts/brain.mjs` (Node 18+, senza pacchetti); `.claude-plugin/` rende il repository un plugin per agenti cloud che registra il server MCP (`$HIVEVAULT_URL/mcp`, chiave in `$HIVEVAULT_API_KEY`) e le skill |
-| `llms.txt` | `GET /llms.txt` pubblico: come collegarsi e quali tool esistono (nessun dato) |
-| Dati dimostrativi | `scripts/seed-demo.ts` crea una chiave per l'account `agent-demo` (lettura e scrittura, clearance interno) in `data/dev-demo.json`, per collegare un agente cloud al server di sviluppo |
+| MCP server | `@cb/mcp`, mounted at `POST /mcp` (stateless streamable HTTP: each request creates a server bound to the account, any server process can handle it). API accounts only, with Bearer key and `read` scope. Official `@modelcontextprotocol/sdk` 1.32.1 |
+| 9 tools | `brain_overview`, `brain_search`, `brain_read` (compiled pages and uncompiled documents, budgeted), `brain_neighbors`, `brain_timeline` (entity or date range), `brain_source` (extracted text of a citation, never the raw file), `brain_ask` (local model answer with citations; citations to unprovided IDs flagged), `brain_capture` (note in `inbox/`), `brain_propose_edit` (proposal queued for curators). Every item reports its token cost; every tool accepts a budget |
+| Resources and prompts | `brain://<vault>/index`, `brain://<vault>/llms.txt`, `brain://<vault>/page/<id>`; prompts `cosa-sappiamo-di`, `stato-cliente`, `prepara-riunione` |
+| Classification filter | The MCP reader caps clearance at `interno` (`MCP_MAX_CLASSIFICATION`), regardless of the account's own clearance; RLS enforces it a second time. Agent indexes are rendered per reader under RLS: the stored copy built by the nightly cycle (containing all pages) is never served, neither over MCP nor over REST |
+| Audit | Reads in the buffered log: `page.read` (feeds "What the cloud agent read"), `search`, `source.read`, `mcp.<tool>`, all tagged `via: mcp`. Writes (`mcp.capture`, `mcp.propose_edit`) and approvals (`curator.apply`) are written immediately |
+| Edit proposals | New `proposal` item type in the curator queue (migration 010): line-by-line diff, "Approve and apply" (requires write permission on the vault) or "Reject". If the page changes after the proposal is created, the proposal expires |
+| Skills and plugin | `skills/hivevault-query` (workflow: overview → search → budgeted read → neighbors/timeline → source; how to cite; when to say the memory does not know), `skills/hivevault-ingest` with client `scripts/brain.mjs` (Node 18+, zero dependencies); `.claude-plugin/` turns the repository into a cloud-agent plugin registering the MCP server (`$HIVEVAULT_URL/mcp`, key in `$HIVEVAULT_API_KEY`) and skills |
+| `llms.txt` | Public `GET /llms.txt`: how to connect and which tools exist (no private data) |
+| Demo data | `scripts/seed-demo.ts` creates a key for the `agent-demo` account (read and write, `interno` clearance) in `data/dev-demo.json`, to connect a cloud agent to the dev server |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| recall@5 ≥ 0,85 | SUPERATO: **0,992** con il riordino di 20 candidati (valore predefinito), 0,962 con 10. Corpus sintetico (seed 42): 388 documenti, 131 domande con le fonti attese, indicizzati con il modello di embedding locale; ricerca come `brain_search` per un account API ([rapporto 20](phase6-eval-rerank20.md), [rapporto 10](phase6-eval-rerank10.md)) |
-| Nessuna pagina `riservato` restituita a clearance `interno` | SUPERATO: 10 documenti «canarino» `riservato` caricati nello stesso vault, account API con clearance `segreto`: 0 restituiti dalla ricerca mirata e dalla lettura per id, 0 risposte su 131 con elementi sopra «interno». Test HTTP con il client MCP ufficiale: pagine `riservato` e `segreto` assenti da ricerca, lettura, risorse e `llms.txt` |
+| recall@5 ≥ 0.85 | PASS: **0.992** reranking 20 candidates (default), 0.962 with 10. Synthetic corpus (seed 42): 388 documents, 131 questions with expected sources, indexed with the local embedding model; queried via `brain_search` as an API account ([20-candidate report](phase6-eval-rerank20.md), [10-candidate report](phase6-eval-rerank10.md)) |
+| Zero `riservato` pages returned at `interno` clearance | PASS: 10 `riservato` (confidential) canary documents loaded in the same vault, API account holding `segreto` (secret) clearance: 0 returned by targeted search or read-by-id, 0 of 131 responses containing items above `interno`. HTTP tests with the official MCP client: `riservato` and `segreto` pages absent from search, read, resources, and `llms.txt` |
 
-| Misura (eval, 131 domande) | 20 candidati | 10 candidati |
+| Metric (eval, 131 questions) | 20 candidates | 10 candidates |
 |---|---|---|
-| recall@5 | 0,992 | 0,962 |
-| hit@1 | 0,733 | 0,748 |
-| MRR | 0,833 | 0,837 |
-| Token medi per risposta di `brain_search` | 838 | 857 |
-| Latenza mediana (reranker su CPU) | 5,3 s | 2,7 s |
+| recall@5 | 0.992 | 0.962 |
+| hit@1 | 0.733 | 0.748 |
+| MRR | 0.833 | 0.837 |
+| Mean tokens per `brain_search` response | 838 | 857 |
+| Median latency (reranker on CPU) | 5.3 s | 2.7 s |
 
-`brain_ask` con il modello di chat reale (Qwen3.8 27B, 30 domande): 90% di risposte corrette (per gli elenchi almeno l'80% degli elementi), 0 citazioni a id non forniti, 58% delle citazioni contiene il valore atteso, 8,3 s in media. Le 5 contraddizioni volute del corpus: in 5 risposte su 5 entrambi i valori sono riportati con la loro fonte, ma solo 1 lo dice esplicitamente. Le 3 risposte sbagliate sono elenchi (progetti di una persona) sparsi su molti documenti: per queste domande la skill indica `brain_neighbors`.
+`brain_ask` with the real chat model (Qwen3.8 27B, 30 questions): 90% correct answers (for lists, at least 80% of items), 0 citations to unprovided IDs, 58% of citations contain the expected value, 8.3 s average. The 5 intentional contradictions in the corpus: 5 of 5 answers report both values with their sources, though only 1 flags the conflict explicitly. The 3 wrong answers are list questions (a person's projects) scattered across many documents: for those, the skill directs agents to `brain_neighbors`.
 
-Test: 181 unitari e di database (3 nuovi file: server MCP con il client ufficiale, `llms.txt`, proposte), 41 Playwright nei 4 temi (nuovo: approvazione di una proposta dell'agente cloud dalla coda).
+Tests: 181 unit and database tests (3 new files: MCP server with the official client, `llms.txt`, proposals), 41 Playwright tests across all 4 themes (new: approving a cloud-agent proposal from the curator queue).
 
-## Problemi trovati e corretti
+## Issues found and fixed
 
-1. **Indici con titoli riservati.** L'indice salvato dal ciclo notturno è scritto con tutti i permessi: servito così, avrebbe mostrato titoli e sintesi di pagine `riservato` a chi non può leggerle (via MCP e via `GET /api/vaults/:id/index/:name`). Ora l'indice è generato per il lettore sotto RLS; la copia salvata serve solo a esportazioni e amministratori.
-2. **Punteggio dell'eval.** La prima versione chiedeva la frase attesa intera («SQL Server: vincolo dell'infrastruttura…») e contava 70% di risposte corrette; con il valore chiave e gli elementi degli elenchi le risposte corrette sono 90%. Il testo di ogni risposta è salvato per controllo.
-3. **Lock esauriti con molti vault.** Il database di test aveva accumulato 1.100 vault, quindi 1.100 partizioni dei chunk con i loro indici: le query su molte partizioni esaurivano la tabella dei lock («out of shared memory», `max_locks_per_transaction` = 64). Con una cella per persona anche la produzione avrà migliaia di vault: `docker-compose.yml` porta il limite a 1024. La creazione del database di test ora tollera la gara tra i processi di test.
-4. **Script senza `.env`.** `seed-demo`, `dream-now` e l'eval non caricavano `.env` (lo fa il punto d'ingresso del server): i modelli locali risultavano spenti. Ora lo caricano come primo import.
+1. **Indexes leaking confidential titles.** The index saved by the nightly cycle is built with full privileges: served as-is, it would expose titles and summaries of `riservato` pages to readers without clearance (over MCP and `GET /api/vaults/:id/index/:name`). Indexes are now rendered per reader under RLS; the stored copy is used only for exports and administrators.
+2. **Eval scoring.** The first version matched the entire expected sentence ("SQL Server: infrastructure constraint…") and scored 70% correct; matching the key value and list items brings accuracy to 90%. Every full answer is saved for inspection.
+3. **Lock exhaustion with many vaults.** The test database had accumulated 1,100 vaults, meaning 1,100 chunk partitions and their indexes: queries across many partitions exhausted the lock table ("out of shared memory", `max_locks_per_transaction` = 64). With one cell per person, production will also have thousands of vaults: `docker-compose.yml` raises the limit to 1024. Test-database creation now tolerates races between test processes.
+4. **Scripts not loading `.env`.** `seed-demo`, `dream-now`, and the eval did not load `.env` (only the server entrypoint did), so local models appeared disabled. They now load it as their first import.
 
-## Da sapere
+## Good to know
 
-1. **Antivirus e HTTP locale.** Su questa macchina il Web Shield di Avast (`wsc_proxy.exe`) intercetta anche l'HTTP verso `127.0.0.1` e riscrive le risposte dei server Node: toglie `Content-Length`, dichiara `transfer-encoding: chunked` e lascia il corpo non codificato. I browser lo tollerano, i client rigorosi (fetch di Node, usato dall'agente di programmazione e dal client MCP) no. Il server è corretto (verificato a livello di socket); i test MCP passano per `app.inject`. Per usare l'agente di programmazione con il server di sviluppo su questa macchina serve un'eccezione per l'indirizzo nell'antivirus. Va scritto nella guida di installazione insieme alla nota della fase 2 sul TLS.
-2. **Latenza del riordino.** Il reranker 0,6B su CPU costa circa 0,25 s per candidato: con 20 candidati `brain_search` impiega circa 5 s. `MCP_RERANK_TOP=10` dimezza il tempo con una piccola perdita di recall. Un reranker su GPU o su un host dedicato (D10) toglierebbe il compromesso.
-3. **Contraddizioni.** Il modello riporta i valori discordi ma raramente lo dice in modo esplicito; nelle pagine compilate le contraddizioni sono già segnalate dal ciclo notturno (`[!conflict]`, coda dei curatori), quindi la via consigliata all'agente cloud resta search + read.
-4. **`npm audit`.** Restano avvisi su dipendenze di sviluppo già presenti (vitest, plugin Svelte, pptxgenjs del generatore di corpus): non sono nel server e la correzione richiede aggiornamenti maggiori. Da rivedere in fase 8.
-5. **Compilazione dell'eval.** L'eval misura la ricerca sui documenti indicizzati (I2) senza compilarli in pagine: compilare 388 documenti con il modello da 27B richiederebbe ore. La misura su pagine compilate arriverà con un corpus compilato di notte dal ciclo notturno.
+1. **Antivirus and local HTTP.** On this machine, Avast Web Shield (`wsc_proxy.exe`) also intercepts HTTP to `127.0.0.1` and rewrites Node server responses: it strips `Content-Length`, adds `transfer-encoding: chunked`, and leaves the body unchunked. Browsers tolerate it, strict clients (Node `fetch`, used by coding agents and the MCP client) do not. The server itself is correct (verified at the socket level); MCP tests use `app.inject`. Using a coding agent against the dev server on this machine requires an antivirus exception for the address. Document in the installation guide alongside the Phase 2 TLS note.
+2. **Reranking latency.** The 0.6B reranker on CPU costs ~0.25 s per candidate: with 20 candidates, `brain_search` takes ~5 s. `MCP_RERANK_TOP=10` halves latency for a small recall drop. A reranker on GPU or on a dedicated host (D10) removes the trade-off.
+3. **Contradictions.** The model reports conflicting values but rarely states the conflict explicitly; on compiled pages, contradictions are already flagged by the nightly cycle (`[!conflict]`, curator queue), so search + read remains the recommended path for cloud agents.
+4. **`npm audit`.** Existing advisories remain in dev dependencies (`vitest`, Svelte plugin, `pptxgenjs` for the corpus generator): none are in the server runtime and fixing them requires major upgrades. Revisit in Phase 8.
+5. **Eval compilation.** The eval measures search over indexed documents (I2) without compiling them into entity pages: compiling 388 documents with the 27B model would take hours. Measurements on compiled pages will come from a corpus compiled overnight by the dream cycle.
 
-# Fase 7 — console di amministrazione e dashboard
+# Phase 7 — Administration console and dashboards
 
-Data: 2026-11-02
+Date: 2026-11-02
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Console (`#/admin/…`) | 11 sezioni per gli amministratori: utenti (creazione con link di attivazione, ruolo, livello, sospensione, azzeramento TOTP, chiusura delle sessioni, passkey e chiavi di firma), account API (chiave mostrata una volta, rotazione, revoca, indirizzi ammessi, scadenza), vault e spazi (impostazioni, celle che alimentano uno spazio, ciclo notturno subito, esporta e importa zip, eliminazione con lo slug come conferma), matrice dei permessi account × vault, sorgenti di tutti i vault (riprova, compila, elimina con i file contenuti e gli originali cifrati), import massivi, task (conteggi, giornale, riprova, annulla), modelli, audit con ricerca, impostazioni, backup. Ogni modifica è scritta subito nel log di audit |
-| Pagina «Modelli» | Stato, latenza, elementi al secondo, richieste ed errori di ogni endpoint del dispatcher; prova di un endpoint (health, identità del modello, una richiesta minima); code per priorità. Processi locali: avvia, ferma, riavvia, log; thread e orario (sempre, fascia, su richiesta) applicati senza riavvio del server. Endpoint remoti aggiunti e rimossi dalla console (salvati nelle impostazioni, ammessi dall'egress guard) |
-| Impostazioni | Tabella `settings` (migrazione 011) sopra i valori del file `.env`: finestra e budget del ciclo notturno (letti a ogni passo e a ogni risveglio del pianificatore), classificazione predefinita dei nuovi vault, testo dell'avviso sull'agente cloud, processi locali, endpoint remoti |
-| Storico delle pagine | «Ripristina questa versione»: la versione scelta diventa una nuova versione e lo storico resta intatto (`POST /api/pages/:id/restore`, audit `page.restore`) |
-| Metriche | Registro in processo (`@cb/shared`: contatori, gauge, istogrammi in ms). Ogni minuto ogni processo scrive la sua parte in `metrics_1m` (partizioni giornaliere, 14 giorni). Un solo processo, eletto con un advisory lock, campiona i gauge (host, database, task, sorgenti, modelli, accessi; partizioni e salute della memoria ogni 15 minuti) e calcola i rollup `metrics_1h` (400 giorni) e `metrics_1d`. Strumentati: HTTP, ricerca per ramo, dispatcher, fasi dei task, lettura dei documenti, ciclo notturno, promozioni, audit, egress bloccato |
-| Query dei pannelli | `POST /api/admin/metrics/query` (fino a 40 query per richiesta). Il server sceglie la tabella dal periodo (fino a 36 ore al minuto, fino a 45 giorni all'ora, poi al giorno) e restituisce circa 300 punti per serie. Aggregazioni: rate, sum, avg, max, min, last, count e i percentili p50, p95, p99 dai bucket degli istogrammi. Le tabelle dei pannelli sono in `GET /api/admin/stats/:name` (query lente da `pg_stat_statements`, partizioni, copertura, errori dei parser, cicli notturni, alveare, liste della salute, sicurezza) |
-| Dashboard (`#/dashboard/…`) | Le 10 di §8.4: Panoramica, Ingestion e import, Ricerca, Salute della memoria, Alveare, Dream cycle, Modelli, Database, Accessi e sicurezza, Host. Periodo globale (da 1 ora a 90 giorni), aggiornamento automatico, variabile `$spazio`, griglia di 12 colonne con pannelli spostabili e ridimensionabili (mouse o tastiera, layout salvato per persona), vista tabella per ogni grafico, soglie con icona e testo, collegamenti agli elenchi filtrati della console |
-| Grafici | SVG propri sui token dei temi: un solo asse da zero, linee da 2 px, interruzioni dove mancano dati, mirino e tooltip, legenda che nasconde una serie senza cambiare i colori delle altre, al massimo 6 serie colorate (le altre in «Altri»). Le serie 4-6 si aggiungono alle 3 originali; lo script di controllo della palette le ha verificate sui 4 temi (luminosità, croma, separazione per daltonismo, contrasto) |
-| Prometheus | `GET /metrics` con `METRICS_TOKEN` (Bearer) o con la sessione di un amministratore: contatori cumulativi, gauge, istogrammi con bucket `le` |
+| Console (`#/admin/…`) | 11 sections for administrators: users (create with enrollment link, role, clearance, suspend, reset TOTP, revoke sessions, passkeys and signing keys), API accounts (key shown once, rotate, revoke, allowed IPs, expiry), vaults and spaces (settings, cells feeding a space, run dream cycle now, export/import zip, delete with slug confirmation), account × vault permission matrix, sources across all vaults (retry, compile, delete including child files and encrypted originals), bulk imports, tasks (counts, journal, retry, cancel), models, searchable audit log, settings, backups. Every change is written immediately to the audit log |
+| "Models" page | Status, latency, items/s, requests, and errors for each dispatcher endpoint; endpoint probe (health, model identity, minimal request); per-priority queues. Local processes: start, stop, restart, logs; thread count and schedule (always, time window, on demand) applied without restarting the server. Remote endpoints added and removed from the console (saved in settings, allowed by the egress guard) |
+| Settings | `settings` table (migration 011) overriding `.env` values: dream cycle window and budgets (read on each step and scheduler wakeup), default classification for new vaults, cloud-agent disclosure text, local processes, remote endpoints |
+| Page history | "Restore this version": the chosen version becomes a new version while keeping history intact (`POST /api/pages/:id/restore`, audit `page.restore`) |
+| Metrics | In-process registry (`@cb/shared`: counters, gauges, ms histograms). Every minute each process flushes its slice to `metrics_1m` (daily partitions, 14-day retention). A single leader process elected via advisory lock samples gauges (host, database, tasks, sources, models, logins; partitions and memory health every 15 minutes) and computes `metrics_1h` (400-day retention) and `metrics_1d` rollups. Instrumented: HTTP, search by branch, dispatcher, task phases, document reads, dream cycle, promotions, audit, blocked egress |
+| Panel queries | `POST /api/admin/metrics/query` (up to 40 queries per request). The server selects the table from the time range (up to 36 hours at 1-minute resolution, up to 45 days at 1-hour, then daily) and returns ~300 points per series. Aggregations: rate, sum, avg, max, min, last, count, plus p50, p95, p99 percentiles from histogram buckets. Tabular panels use `GET /api/admin/stats/:name` (slow queries from `pg_stat_statements`, partitions, coverage, parser errors, dream runs, hive, health lists, security) |
+| Dashboards (`#/dashboard/…`) | All 10 from §8.4: Overview, Ingestion & import, Search, Memory health, Hive, Dream cycle, Models, Database, Logins & security, Host. Global time range (1 hour to 90 days), auto-refresh, `$spazio` variable, 12-column grid with movable and resizable panels (mouse or keyboard, per-user layout persistence), table view for every chart, thresholds with icon and label, links into filtered console lists |
+| Charts | Custom SVG using theme tokens: single zero-based axis, 2 px lines, gaps for missing data, crosshair and tooltip, legend toggling series without shifting colors of remaining series, max 6 colored series (remainder grouped into "Other"). Series 4–6 extend the original 3; the palette check script verified them across all 4 themes (lightness, chroma, color-blind separation, contrast) |
+| Prometheus | `GET /metrics` with `METRICS_TOKEN` (Bearer) or an admin session: cumulative counters, gauges, histograms with `le` buckets |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| Ogni entità gestibile dalla UI | SUPERATO: utenti, account API, chiavi e passkey, sessioni, vault e spazi, collegamenti dell'alveare, permessi, sorgenti, import, task, pagine (modifica, storico, ripristino, unione dalla coda), coda dei curatori, modelli locali e remoti, impostazioni, backup ed esportazione. Test Playwright nei 4 temi: creazione di un account API con chiave mostrata una volta, permesso dalla matrice, impostazioni salvate, apertura di ogni sezione |
-| Dashboard fluide con 7 giorni di dati al minuto | SUPERATO: 7 giorni al minuto per 264 serie (1.665.183 righe, 269 MB con i rollup; scrittura a 52.000 righe/s, rollup orario di 7 giorni in 3,9 s). La misura esegue insieme tutte le query di una dashboard, come la pagina: mediana peggiore **129 ms** (Ingestion, 24 ore al minuto), p95 peggiore 137 ms; con 7 giorni al massimo 72 ms, con 30 giorni al massimo 20 ms. Il rapporto è in `bench/out/` (non versionato); `npx tsx bench/phase7/metrics-bench.ts` ripete la misura |
+| Every entity manageable from the UI | PASS: users, API accounts, keys and passkeys, sessions, vaults and spaces, hive feeds, permissions, sources, imports, tasks, pages (edit, history, restore, merge from queue), curator queue, local and remote models, settings, backups, and exports. Playwright tests across all 4 themes: creating an API account with key shown once, toggling a permission in the matrix, saving settings, opening every section |
+| Smooth dashboards with 7 days of 1-minute data | PASS: 7 days at 1-minute granularity across 264 series (1,665,183 rows, 269 MB including rollups; writes at 52,000 rows/s, 7-day hourly rollup in 3.9 s). Benchmark executes all queries of a dashboard concurrently, matching the UI: worst median **129 ms** (Ingestion, 24 h at 1-minute), worst p95 137 ms; at 7 days max 72 ms, at 30 days max 20 ms. Report lives in `bench/out/` (not tracked); `npx tsx bench/phase7/metrics-bench.ts` repeats the run |
 
-| Periodo (10 dashboard) | Tabella | Mediana peggiore | p95 peggiore |
+| Range (10 dashboards) | Table | Worst median | Worst p95 |
 |---|---|---|---|
-| 1 ora | 1m | 30 ms | 33 ms |
-| 24 ore | 1m | 129 ms | 137 ms |
-| 7 giorni | 1h | 58 ms | 72 ms |
-| 30 giorni | 1h | 20 ms | 20 ms |
+| 1 hour | `1m` | 30 ms | 33 ms |
+| 24 hours | `1m` | 129 ms | 137 ms |
+| 7 days | `1h` | 58 ms | 72 ms |
+| 30 days | `1h` | 20 ms | 20 ms |
 
-Test: 191 unitari e di database. Nuovi: registro, quantili, scrittura, rollup e query, elezione del processo leader; API della console con ogni pannello eseguito sullo schema reale, Prometheus, task, impostazioni, modelli, eliminazione delle sorgenti, esportazione e importazione di un vault; ripristino di una versione. 58 test Playwright nei 4 temi. Nuovi: console, dashboard con un pannello spostato da tastiera e il layout salvato, axe WCAG 2.1 AA su 7 viste della console e delle dashboard.
+Tests: 191 unit and database tests. New: registry, quantiles, flush, rollup and query, leader election; console API executing every panel against the real schema, Prometheus, tasks, settings, models, source deletion, vault export/import; version restore. 58 Playwright tests across all 4 themes. New: console, dashboard with a panel moved by keyboard and layout persisted, axe WCAG 2.1 AA across 7 console and dashboard views.
 
-## Problemi trovati e corretti
+## Issues found and fixed
 
-1. **Etichette codificate due volte.** Le etichette delle serie passate come `jsonb[]` arrivavano come stringhe JSON dentro il JSON. Ora passano come `text[]` con il cast in SQL.
-2. **Pagina bianca dopo un nuovo build.** Una scheda aperta chiedeva un file JavaScript del build precedente. Il server rispondeva con la pagina dell'app (HTML) e il browser si fermava. Ora un file mancante (un percorso con estensione) riceve un 404.
-3. **Console nel bundle principale.** Console e dashboard aggiungevano 130 KB al caricamento di ogni utente. Ora si caricano solo quando un amministratore le apre: il bundle principale passa da 398 a 270 KB.
-4. **Spazio per le dashboard.** A 1440 px la griglia aveva solo 574 px (barra laterale, pannello destro, elenco delle dashboard). Il pannello destro mostra struttura e collegamenti della pagina attiva, quindi sulla console e sulle dashboard non si apre. La griglia passa a 6 o a 1 colonna quando lo spazio è poco.
-5. **Contrasto dei badge.** Il testo colorato sui fondi tenui scendeva a 4,3:1 nel tema Carta. Ora il testo usa il colore del testo; il tono è nel fondo e in un punto.
-6. **Test del ciclo notturno legato alla data.** Il test usava la notte del 28 ottobre 2026: dopo quella data il motore svegliava subito il task in pausa. Ora il test usa una notte dell'anno successivo.
+1. **Double-encoded labels.** Series labels passed as `jsonb[]` arrived as JSON strings inside JSON. Now passed as `text[]` and cast in SQL.
+2. **Blank page after a rebuild.** An open tab requested a JavaScript asset from the previous build. The server replied with the SPA HTML page and the browser stalled. Missing files (paths with a file extension) now return 404.
+3. **Console inside the main bundle.** Console and dashboards added 130 KB to every user's load. They now lazy-load only when an administrator opens them: the main bundle drops from 398 to 270 KB.
+4. **Dashboard horizontal space.** At 1440 px, the grid had only 574 px left (sidebar, right panel, dashboard list). Because the right panel shows outline and links for the active page, it no longer opens on console and dashboard views. The grid adapts to 6 or 1 column on narrow viewports.
+5. **Badge contrast.** Colored text on soft backgrounds dipped to 4.3:1 in the Paper theme. Text now uses the standard text color; semantic color stays in the background and a status dot.
+6. **Date-coupled dream-cycle test.** The test hardcoded the night of October 28, 2026: after that date, the engine woke the paused task immediately. The test now uses a night in the following year.
 
-## Da sapere
+## Good to know
 
-1. **`/metrics` mostra un solo processo.** Prometheus legge i contatori del processo che risponde. Con più processi, leggi ogni processo oppure usa le dashboard, che sommano tutti i processi dal database.
-2. **Rete dell'host solo su Linux.** Il pannello «Rete» legge `/proc/net/dev`: su Windows (sviluppo) è vuoto.
-3. **Backup continuo del database.** La pagina «Backup» esporta i vault in Markdown e mostra gli spazi usati. pgBackRest e il ripristino a un istante preciso sono nella fase 8.
-4. **Amministratore di sviluppo.** `npx tsx scripts/dev-admin.ts` crea `admin` e salva il segreto TOTP in `data/dev-admin.json` (non versionato).
+1. **`/metrics` reports a single process.** Prometheus scrapes the counters of whichever process handles the request. With multiple processes, scrape each process individually or use the dashboards, which aggregate across all processes from the database.
+2. **Host network stats are Linux-only.** The "Network" panel reads `/proc/net/dev`: on Windows (development), it is empty.
+3. **Continuous database backup.** The "Backup" page exports vaults to Markdown and shows storage usage. pgBackRest and point-in-time recovery arrive in Phase 8.
+4. **Development administrator.** `npx tsx scripts/dev-admin.ts` creates `admin` and writes the TOTP secret to `data/dev-admin.json` (git-ignored).
 
-# Fase 8 — hardening e rilascio
+# Phase 8 — Hardening and release
 
-Data: 2026-11-02
+Date: 2026-11-02
 
-## Cosa c'è
+## What was built
 
-| Parte | Dettaglio |
+| Component | Detail |
 |---|---|
-| Revisione di sicurezza | OWASP ASVS 4.0.3 livello 2, capitolo per capitolo, con la prova di ogni requisito: [docs/sicurezza/asvs-l2.md](../sicurezza/asvs-l2.md). 7 problemi trovati e corretti (sotto) |
-| Backup | Immagine PostgreSQL con pgBackRest (`docker/postgres`): archiviazione continua del WAL (al massimo 5 minuti di modifiche perse), repository cifrato AES-256 con compressione zstd, 2 backup completi conservati. `npm run backup -- stanza\|full\|diff\|info\|check\|verify` |
-| Ripristino verificato | `npm run backup -- verify`: ripristino a un istante preciso in un contenitore e in un volume temporanei, controllo dei dati, pulizia. Timer mensile nello script di installazione |
-| Test di carico | k6 (immagine ufficiale `grafana/k6`), 40 utenti per 3 minuti: ricerca, lettura con budget, pagina completa, recenti (`bench/phase8/`) |
-| Profilazione | `pg_stat_statements` e `EXPLAIN ANALYZE`: due liste della UI corrette con indici parziali (migrazione 012) |
-| Host dei modelli remoto | Embedding (porta 8080) e rerank (porta 8081) collegati con chiave API, verificati dal dispatcher (stesso modello dei vettori salvati) e misurati (`bench/phase8/models-hosts.ts`) |
-| Installazione | `scripts/install.sh`: controlli, `.env` con segreti casuali, build, database, backup, servizio systemd e timer dei backup |
-| Documentazione (ASD-STE 100) | [installazione](../guide/installazione.md), [operatore](../guide/operatore.md), [amministratore](../guide/amministratore.md), [utente](../guide/utente.md) |
-| Checklist di rilascio | [docs/RILASCIO.md](../RILASCIO.md): voci di sviluppo verificate, voci di installazione da spuntare sul server |
+| Security review | OWASP ASVS 4.0.3 Level 2, chapter by chapter, with evidence for each requirement: [docs/security/asvs-l2.md](../security/asvs-l2.md). 7 issues found and fixed (below) |
+| Backups | PostgreSQL image with pgBackRest (`docker/postgres`): continuous WAL archiving (at most 5 minutes of data loss), AES-256 encrypted repository with zstd compression, 2 full backups retained. `npm run backup -- stanza\|full\|diff\|info\|check\|verify` |
+| Verified restore | `npm run backup -- verify`: point-in-time recovery into a temporary container and volume, data verification, cleanup. Monthly timer included in the installer script |
+| Load test | k6 (official `grafana/k6` image), 40 users for 3 minutes: search, budgeted read, full page, recent (`bench/phase8/`) |
+| Profiling | `pg_stat_statements` and `EXPLAIN ANALYZE`: two UI lists fixed with partial indexes (migration 012) |
+| Remote model host | Embedding (port 8080) and rerank (port 8081) connected with API key, verified by the dispatcher (same model as stored vectors) and benchmarked (`bench/phase8/models-hosts.ts`) |
+| Installation | `scripts/install.sh`: preflight checks, `.env` with random secrets, build, database, backup, systemd service, and backup timers |
+| Documentation (ASD-STE 100) | [installation](../guides/installation.md), [operator](../guides/operator.md), [administrator](../guides/administrator.md), [user](../guides/user.md) |
+| Release checklist | [docs/RELEASE.md](../RELEASE.md): development items verified, deployment items to check off on the production server |
 
-## Verifica
+## Verification
 
-| Criterio di accettazione | Esito |
+| Acceptance criterion | Result |
 |---|---|
-| Checklist di rilascio completa | SUPERATO per le voci di sviluppo (qualità, sicurezza, prestazioni, backup): tutte verificate con il comando o il test indicato. Le voci di installazione (HTTPS, chiavi copiate fuori dal server, repository di backup su un altro disco) si spuntano sul server di produzione |
+| Complete release checklist | PASS for development items (quality, security, performance, backups): all verified with the listed command or test. Deployment items (HTTPS, keys copied off-server, backup repository on a separate disk) are checked off on the production server |
 
-| Misura | Risultato | Obiettivo (piano §0.2) |
+| Metric | Result | Target (plan §0.2) |
 |---|---|---|
-| Ricerca ibrida senza rerank, fuori dalla cache, 40 utenti | **p95 153 ms** (233 ricerche; mediana 112 ms) | < 200 ms |
-| Lettura di una pagina con budget, 40 utenti | **p95 14 ms** (3.225 letture) | < 20 ms |
-| Pagina completa / recenti | p95 20 ms / 14 ms | — |
-| Ricerca dalla cache | p95 12 ms | — |
-| Errori HTTP sotto carico | **0** su 7.970 richieste (35 richieste/s) | < 1% |
-| Backup completo del database di sviluppo (5,4 GB) | 15 s, 1 GB cifrato e compresso | — |
-| Ripristino a un istante preciso | **11 s** di restore, 26 s in tutto; il segno prima dell'istante c'è, quello dopo no; conteggi di 7 tabelle identici (1,1 milioni di sorgenti e di vettori), 0 pagine orfane | dati identici |
-| Inbox / «Da rivedere» (1,1 milioni di sorgenti) | da 95 / 77 ms a **0,15 / 0,02 ms** | — |
+| Hybrid search without rerank, uncached, 40 users | **p95 153 ms** (233 searches; median 112 ms) | < 200 ms |
+| Budgeted page read, 40 users | **p95 14 ms** (3,225 reads) | < 20 ms |
+| Full page / recent | p95 20 ms / 14 ms | — |
+| Cached search | p95 12 ms | — |
+| HTTP errors under load | **0** out of 7,970 requests (35 req/s) | < 1% |
+| Full backup of dev database (5.4 GB) | 15 s, 1 GB encrypted and compressed | — |
+| Point-in-time recovery | **11 s** restore, 26 s total; pre-target marker present, post-target marker absent; row counts across 7 tables identical (1.1M sources and vectors), 0 orphan pages | identical data |
+| Inbox / "To review" (1.1M sources) | from 95 / 77 ms down to **0.15 / 0.02 ms** | — |
 
-| Host dei modelli (stessi modelli 0,6B Q8_0) | Embedding (chunk di 300–400 parole) | Rerank di 20 candidati (mediana) |
+| Model host (same 0.6B Q8_0 models) | Embedding (300–400-word chunks) | Rerank of 20 candidates (median) |
 |---|---|---|
-| Host remoto (CPU) | 2,5 chunk/s | 2,0 s |
-| Questo PC (processi locali, CPU) | 1 chunk/s | 5,1 s |
+| Remote host (CPU) | 2.5 chunks/s | 2.0 s |
+| This PC (local processes, CPU) | 1 chunk/s | 5.1 s |
 
-Test: 193 unitari e di database (nuovi: redazione dei log, endpoint dei modelli solo privati, zip bomb, header e `no-store`, ricerca con vault indicizzati da un altro modello, schemi dei tool MCP con zod 4), 58 Playwright nei 4 temi.
+Tests: 193 unit and database tests (new: log redaction, private-only model endpoints, zip bomb, headers and `no-store`, search across vaults indexed by another model, MCP tool schemas with zod 4), 58 Playwright tests across all 4 themes.
 
-## Problemi trovati e corretti
+## Issues found and fixed
 
-1. **La ricerca si fermava con un vault indicizzato da un altro modello.** Il primo test di carico ha dato il 100% di errori sulle ricerche: 7 vault dei benchmark della fase 3 hanno 1,1 milioni di vettori del modello finto (16 dimensioni) e la ricerca confrontava il vettore della domanda (1024 dimensioni) anche con quelli. Lo stesso accadrebbe in produzione dopo un cambio del modello di embedding, finché i vettori vecchi non sono ricalcolati. Ora i rami vettoriali confrontano solo i vettori del modello della domanda (invariante 3). Il nome del modello va normalizzato come fa l'indicizzatore: senza, il filtro avrebbe escluso in silenzio tutti i vettori. Un test riproduce il guasto (fallisce senza la correzione con lo stesso errore).
-2. **Endpoint dei modelli verso Internet.** Un amministratore poteva aggiungere dalla console un endpoint su un indirizzo pubblico e il testo dei documenti sarebbe uscito dalla rete (invariante 1). Ora l'indirizzo deve risolversi solo su indirizzi privati.
-3. **Zip bomb nell'import dei vault.** Nessun limite sulla dimensione decompressa; ora 50.000 file, 50 MB per file e 2 GB in totale, contati durante la decompressione.
-4. **Ripristino non funzionante al primo tentativo.** La prova di ripristino ha trovato due difetti della procedura: il server ripristinato legge il WAL dal repository e gli servono la passphrase e il volume del repository; e il recupero rifiuta impostazioni (`max_connections` e altre) più basse di quelle del server originale. Lo script e la guida dell'operatore ora li gestiscono.
-5. **Due liste della UI leggevano tutta la tabella delle sorgenti** per ogni apertura (Inbox e «Da rivedere», lettura parallela di 1,1 milioni di righe). Indici parziali nell'ordine di ogni lista; per un utente con un solo vault il piano resta sull'indice del vault (controllato).
-6. **Sicurezza minore**: risposte dell'API memorizzabili dal browser (`no-store` aggiunto), mancavano `Permissions-Policy` e CORP, il logger poteva scrivere segreti (ora redatti), token di `/metrics` confrontato senza tempo costante, `zod` con un avviso alto (aggiornato a 4.6.7, schemi dei tool verificati).
-7. **Reranker locale con batch di 512 token.** Una coppia domanda + documento più lunga falliva; la ricerca invia solo titolo e frammento (molto meno), ma il processo locale ora ha lo stesso batch del processo di embedding (2048).
-8. **Test end-to-end con una gara.** La matrice dei permessi salva subito; il test ricaricava la pagina prima della risposta del server e falliva in 1 tema su 4. Ora attende la risposta.
+1. **Search failed when any vault was indexed by a different model.** The first load test produced 100% errors on search: 7 vaults from Phase 3 benchmarks held 1.1M vectors from the mock model (16 dimensions) and search compared the query vector (1024 dimensions) against them too. The same would happen in production after an embedding-model upgrade until old vectors are recomputed. Vector branches now compare only vectors produced by the query's model (invariant 3). The model name must be normalized the same way the indexer does: otherwise the filter silently excludes every vector. A regression test reproduces the failure (fails with the exact error without the fix).
+2. **Model endpoints pointing to the public Internet.** An administrator could add a public-IP endpoint from the console, sending document text outside the network (invariant 1). Endpoint hostnames must now resolve exclusively to private addresses.
+3. **Zip bomb in vault import.** Previously had no cap on uncompressed size; now enforces 50,000 files, 50 MB per file, and 2 GB total, counted during decompression.
+4. **Restore failed on the first attempt.** The restore drill uncovered two procedure bugs: the restored server reads WAL from the repository and needs both the passphrase and the repository volume; and recovery rejects lower settings (`max_connections`, etc.) than the original server. Both the script and the operator guide now handle this.
+5. **Two UI lists scanned the entire `sources` table** on every open (Inbox and "To review", parallel scan of 1.1M rows). Added partial indexes matching each list's sort order; for single-vault users, the plan stays on the vault index (verified).
+6. **Minor security fixes**: API responses could be cached by browsers (`no-store` added), `Permissions-Policy` and CORP were missing, the logger could emit secrets (now redacted), `/metrics` token comparison was not constant-time, `zod` had a high-severity advisory (upgraded to 4.6.7, tool schemas verified).
+7. **Local reranker 512-token batch limit.** Longer query + document pairs failed; search only sends title and snippet (much shorter), but the local reranker now uses the same batch size as the embedding process (2048).
+8. **Race condition in end-to-end test.** The permission matrix saves immediately; the test reloaded the page before the server responded and failed in 1 of 4 themes. Now awaits the response.
 
-## Da sapere
+## Good to know
 
-1. **Repository dei backup sullo stesso disco.** In sviluppo il volume `pgbackrest` è sullo stesso disco del database. In produzione montalo su un altro disco o aggiungi un secondo repository (`repo2`): voce 4.3 della checklist.
-2. **Prima ricerca dopo un riavvio.** La prima ricerca di ogni connessione prepara piani e statement e scalda il modello: 2–3 s una volta sola, poi 50–110 ms.
-3. **Dati dei benchmark nel database di sviluppo.** I 7 vault `crash3-…` e `imp3-…` (fase 3) restano con i vettori del modello finto: non disturbano più la ricerca, ma rallentano di circa 40 ms le ricerche di chi li può leggere (lettura sequenziale delle loro partizioni). Si possono eliminare dalla console.
-4. **Indici della migrazione 012 su tabelle grandi.** La migrazione gira in una transazione: su decine di milioni di sorgenti la costruzione degli indici blocca le scritture. In quel caso creali prima a mano con `CONCURRENTLY` (istruzioni nel file).
-5. **Dipendenze con avvisi moderati.** 9 avvisi in due catene non raggiungibili (`glob` in `@fastify/static`, `archiver` in `exceljs`): motivazione nella revisione ASVS, da ricontrollare a ogni rilascio.
-6. **Ingestion continua di 24 ore.** Saltata in questa fase su richiesta; il benchmark della fase 3 (crash e import di 1 milione di file) resta la misura di riferimento.
-7. **Credenziali dell'host dei modelli.** Il server usa solo gli endpoint HTTP dell'host remoto con la chiave API in `.env`; l'accesso SSH non serve.
+1. **Backup repository on the same disk.** In development, the `pgbackrest` volume lives on the same disk as the database. In production, mount it on a separate disk or add a second repository (`repo2`): checklist item 4.3.
+2. **First search after restart.** The first search on each connection prepares plans and statements and warms up the model: 2–3 s once, then 50–110 ms.
+3. **Benchmark data in the development database.** The 7 `crash3-…` and `imp3-…` vaults (Phase 3) still hold mock-model vectors: they no longer break search, but add ~40 ms to searches for users who can read them (sequential scan of their partitions). They can be deleted from the console.
+4. **Migration 012 indexes on large tables.** The migration runs inside a transaction: on tens of millions of sources, index builds block writes. In that case, create them manually beforehand with `CONCURRENTLY` (instructions in the migration file).
+5. **Dependencies with moderate advisories.** 9 advisories in two unreachable chains (`glob` in `@fastify/static`, `archiver` in `exceljs`): rationale in the ASVS review, recheck on every release.
+6. **24-hour continuous ingestion.** Skipped in this phase by request; the Phase 3 benchmark (crash test and 1-million-file import) remains the reference measurement.
+7. **Model host credentials.** The server only talks to the remote host's HTTP endpoints using the API key in `.env`; SSH access is not needed.
